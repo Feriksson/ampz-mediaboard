@@ -32,7 +32,16 @@ public partial class App : Application
 
         base.OnStartup(e);
 
-        new MainWindow().Show();
+        // Doble click en un .mboard desde Explorer: el shell nos pasa el path como argumento.
+        var startupFile = BoardFile.FromCommandLine(e.Args);
+
+        // La extensión se registra sola la primera vez, para que el doble click funcione sin que
+        // el usuario tenga que descubrir un botón. Solo se escribe si NO había asociación previa:
+        // así, tener el build de Debug abierto un rato no le roba la asociación al de Release.
+        // Para repuntarla a este exe existe el botón "Asociar .mboard" de la barra.
+        if (!BoardFile.IsRegistered()) BoardFile.Register();
+
+        new MainWindow(startupFile).Show();
     }
 
     protected override void OnExit(ExitEventArgs e)

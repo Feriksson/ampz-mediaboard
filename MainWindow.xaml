@@ -17,20 +17,25 @@
         <Border Grid.Row="0" Background="#1A1A22" Padding="10,7">
             <Grid>
                 <StackPanel Orientation="Horizontal">
-                    <Button x:Name="SplitVButton" Content="Partir &#x2502;" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Partir el sector seleccionado en dos columnas" />
-                    <Button x:Name="SplitHButton" Content="Partir &#x2500;" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Partir el sector seleccionado en dos filas" />
-                    <Border Width="1" Background="#2E2E3A" Margin="4,2,10,2" />
-                    <Button x:Name="SaveButton" Content="Guardar board" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Ctrl+S — guarda layout, clips y markers de loop" />
-                    <Button x:Name="ResetButton" Content="Board nuevo" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Vacía el board y arranca de un solo sector" />
+                    <Button x:Name="NewButton" Content="Nuevo" Style="{StaticResource ToolbarButton}"
+                            ToolTip="Ctrl+N — board vacío de un solo sector" />
+                    <Button x:Name="OpenButton" Content="Abrir board…" Style="{StaticResource ToolbarButton}"
+                            ToolTip="Ctrl+O — abre un archivo .mboard" />
+                    <Button x:Name="SaveButton" Content="Guardar" Style="{StaticResource ToolbarButton}"
+                            ToolTip="Ctrl+S — guarda en el archivo .mboard actual" />
+                    <Button x:Name="SaveAsButton" Content="Guardar como…" Style="{StaticResource ToolbarButton}"
+                            ToolTip="Ctrl+Shift+S — guarda en un archivo .mboard nuevo" />
                 </StackPanel>
 
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <!-- Acción de una sola vez: si la extensión ya está asociada, el botón ni
+                         aparece. Dejarlo visible para siempre sería ruido permanente por algo
+                         que hacés una vez en la vida. -->
+                    <Button x:Name="AssociateButton" Content="Asociar .mboard"
+                            Style="{StaticResource ToolbarButton}" Visibility="Collapsed"
+                            ToolTip="Hace que los archivos .mboard se abran con esta app al doble click" />
                     <TextBlock Foreground="#5A5A6B" FontSize="10" VerticalAlignment="Center"
-                               Text="Espacio = play/pausa del sector seleccionado  ·  A / B = fijar markers de loop en el playhead" />
+                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead" />
                     <Border Width="1" Background="#2E2E3A" Margin="12,1,10,1" />
                     <!-- El texto lo pone ShowVersion() leyendo el assembly. NO se escribe acá:
                          la única fuente de verdad es <Version> en el .csproj. -->
