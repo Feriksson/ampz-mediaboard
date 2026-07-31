@@ -1,6 +1,5 @@
 using System.Windows.Threading;
 using AmpzMediaBoard.Layout;
-using AmpzMediaBoard.Persistence;
 using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace AmpzMediaBoard.Board;
@@ -132,8 +131,6 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         Select(SplitNode.Sectors(root).First());
         LayoutChanged?.Invoke();
     }
-
-    public void Save() => BoardStore.Save(Root);
 
     public void Dispose()
     {

@@ -281,14 +281,65 @@ frame y listo. Mandándolo por VLC se anima Y queda la zona de loop funcionando 
 
 ---
 
-## Persistencia
+## Persistencia — DOS destinos que NO son lo mismo
 
-Todo en **`%APPDATA%\AmpzMediaBoard\`** (`Persistence/AppPaths.cs`). Nunca junto al exe.
+Distinción central; si se mezclan, la app le pisa cambios al usuario:
+
+| | Sesión | Archivo `.mboard` |
+|---|---|---|
+| Dónde | `%APPDATA%\AmpzMediaBoard\board.json` | Donde el usuario quiera |
+| Cuándo se escribe | **sola**, al cerrar la ventana | **solo** cuando el usuario guarda |
+| Para qué | que no pierdas el trabajo | es tu documento, con nombre |
+
+La sesión recuerda además **qué archivo estaba abierto** (`SessionDto.CurrentFile`), y al restaurar
+solo lo adopta **si todavía existe** — mostrar en el título un board que ya no está sería mentir
+sobre dónde va a escribir el próximo "Guardar".
+
+⚠ **Cerrar la app NO escribe sobre tu `.mboard`.** Autoguardar sobre el archivo pisaría cambios que
+el usuario tal vez no quería conservar. El archivo se escribe cuando él lo pide, y punto.
+
+⚠ El error de `SaveTo` **se devuelve y se muestra**, a diferencia del de la sesión que se traga en
+silencio. Un "guardar" que falla callado es la peor mentira posible: el usuario se va tranquilo
+creyendo que su trabajo está a salvo.
+
+`BoardStore.LoadSession` tiene fallback al formato viejo (un `NodeDto` pelado, sin envoltorio de
+sesión). Cinco líneas para que quien venía usando la app no pierda su board al actualizar.
 
 | Archivo | Contenido |
 |---|---|
-| `board.json` | El árbol de layout + el path del archivo de cada sector + los markers de loop y el flag `LoopEnabled`. |
+| `board.json` | Sesión: árbol de layout + archivo por sector + markers + `CurrentFile`. |
+| `*.mboard` | Board del usuario: el mismo árbol, sin el envoltorio de sesión. |
 | `ampz-crash.log` | Junto al **exe** (si %APPDATA% es lo que falla, ahí no escribiríamos). |
+
+### La extensión `.mboard` y el doble click (`Persistence/BoardFile.cs`)
+
+Asociación en **`HKEY_CURRENT_USER\Software\Classes`**, nunca en HKLM: alcance de usuario, sin
+pedir permisos de administrador y sin tocar la configuración de nadie más en la máquina.
+
+```
+.mboard                                  → (default) = AmpzMediaBoard.Board.1
+AmpzMediaBoard.Board.1                   → (default) = Board de Ampz MediaBoard
+AmpzMediaBoard.Board.1\DefaultIcon       → "<exe>",0
+AmpzMediaBoard.Board.1\shell\open\command→ "<exe>" "%1"
+```
+
+⚠ **El `%1` va entre comillas.** Sin ellas, cualquier board en una carpeta con espacios (o sea,
+casi todas en Windows) llega partido en varios argumentos y no abre nada.
+
+Se registra **sola en el primer arranque**, y SOLO si no había asociación previa — así tener el
+build de Debug abierto un rato no le roba la asociación al de Release. Para repuntarla al exe
+actual está el botón **"Asociar .mboard"** de la barra, que aparece únicamente cuando la extensión
+no está registrada.
+
+Después de escribir el registro se llama a `SHChangeNotify(SHCNE_ASSOCCHANGED)`: sin eso el ícono
+nuevo tarda en aparecer en Explorer, o no aparece hasta reiniciarlo.
+
+El doble click llega como **argumento de línea de comandos** (`App.OnStartup` → `e.Args` →
+`BoardFile.FromCommandLine`). Si hay un `.mboard` válido ahí, se abre ese en vez de restaurar la
+sesión.
+
+**Limitación conocida**: no hay instancia única. Doble click con la app ya abierta levanta una
+segunda ventana en vez de cargar el board en la existente.
 
 `BoardStore` serializa con **DTOs propios**, no con el árbol de dominio: `SectorNode` arrastra un
 MediaPlayer nativo, un BitmapImage y un puntero al padre (un ciclo) — nada de eso puede ni debe
@@ -327,7 +378,15 @@ la estructura del split siguen en el JSON.
 | `A` | Fijar el marker de INICIO del loop en el playhead |
 | `B` | Fijar el marker de FIN del loop en el playhead |
 | `L` | Prender/apagar la zona de loop |
-| `Ctrl+S` | Guardar el board |
+| `Ctrl+N` | Board nuevo (un solo sector vacío) |
+| `Ctrl+O` | Abrir un `.mboard` |
+| `Ctrl+S` | Guardar en el archivo actual (si no hay, pregunta dónde) |
+| `Ctrl+Shift+S` | Guardar como… |
+
+**Partir sectores es SOLO por los botones de la cabecera de cada sector.** La barra superior tenía
+botones de partir y se sacaron: actuaban sobre "el sector seleccionado", lo que obligaba a mirar
+cuál estaba seleccionado antes de apretar. El botón que vive EN el sector no tiene esa ambigüedad
+— partís el que estás mirando.
 
 `A`/`B` fijan los markers **donde está el playhead** porque ese es el flujo real de marcar una
 zona: mirás el clip y en el momento exacto apretás la tecla. Buscar el frame arrastrando el marker

@@ -5,7 +5,7 @@ using AmpzMediaBoard.Layout;
 namespace AmpzMediaBoard.Persistence;
 
 /// <summary>
-/// Persistencia del board: el ÁRBOL de layout + qué archivo hay en cada sector + los markers de
+/// Serialización del board: el ÁRBOL de layout + qué archivo hay en cada sector + los markers de
 /// loop de cada clip.
 ///
 /// Se serializa con DTOs propios y NO con el árbol de dominio directo. ¿Por qué el paso extra?
@@ -13,8 +13,14 @@ namespace AmpzMediaBoard.Persistence;
 /// padre — un ciclo y un montón de estado nativo que ningún serializador puede ni debe tocar.
 /// Los DTOs son planos, tontos, y describen exactamente lo que queremos que sobreviva.
 ///
-/// Patrón de la app: Load() y Save() JAMÁS voltean la app. Si el JSON está corrupto o el disco
-/// falla, degradás a un board vacío y seguís laburando.
+/// Hay DOS destinos, y no son lo mismo:
+/// · <b>Sesión</b> (`%APPDATA%\board.json`) — se escribe sola al cerrar. Su única función es que
+///   no pierdas el trabajo. Recuerda además QUÉ archivo tenías abierto.
+/// · <b>Archivo `.mboard`</b> — un documento del usuario, con nombre y ubicación propios. Solo se
+///   escribe cuando el usuario lo pide explícitamente.
+///
+/// Patrón de la app: Load y Save JAMÁS voltean la app. Si el JSON está corrupto o el disco falla,
+/// degradás a un board vacío y seguís laburando.
 /// </summary>
 public static class BoardStore
 {
@@ -42,28 +48,83 @@ public static class BoardStore
         public bool LoopEnabled { get; set; } = true;
     }
 
-    public static void Save(LayoutNode root)
+    /// <summary>Envoltorio del estado de sesión: el board MÁS el archivo que estaba abierto.</summary>
+    private sealed class SessionDto
+    {
+        public NodeDto? Board { get; set; }
+        public string? CurrentFile { get; set; }
+    }
+
+    /// <summary>Lo que devuelve la restauración de sesión.</summary>
+    public readonly record struct Session(LayoutNode? Root, string? CurrentFile);
+
+    #region Sesión (%APPDATA%)
+
+    public static void SaveSession(LayoutNode root, string? currentFile)
     {
         try
         {
             AppPaths.EnsureDataDir();
-            var json = JsonSerializer.Serialize(ToDto(root), Options);
-            File.WriteAllText(AppPaths.BoardFile, json);
+            var dto = new SessionDto { Board = ToDto(root), CurrentFile = currentFile };
+            File.WriteAllText(AppPaths.BoardFile, JsonSerializer.Serialize(dto, Options));
         }
         catch
         {
-            // Si no se puede guardar, el board sigue vivo en memoria. Perder el guardado es
-            // molesto; tumbar la app con el trabajo del usuario adentro es inaceptable.
+            // Perder el guardado es molesto; tumbar la app con el trabajo del usuario adentro
+            // es inaceptable.
         }
     }
 
-    /// <summary>Devuelve null si no hay board guardado o si no se pudo leer.</summary>
-    public static LayoutNode? Load()
+    public static Session LoadSession()
     {
         try
         {
-            if (!File.Exists(AppPaths.BoardFile)) return null;
-            var dto = JsonSerializer.Deserialize<NodeDto>(File.ReadAllText(AppPaths.BoardFile), Options);
+            if (!File.Exists(AppPaths.BoardFile)) return default;
+            var json = File.ReadAllText(AppPaths.BoardFile);
+
+            var session = JsonSerializer.Deserialize<SessionDto>(json, Options);
+            if (session?.Board is not null)
+                return new Session(FromDto(session.Board), session.CurrentFile);
+
+            // Compatibilidad con el formato viejo, donde el archivo de sesión era un NodeDto
+            // pelado sin envoltorio. Son cinco líneas que evitan que quien venía usando la app
+            // pierda su board la primera vez que abre esta versión.
+            var legacy = JsonSerializer.Deserialize<NodeDto>(json, Options);
+            return legacy is null ? default : new Session(FromDto(legacy), null);
+        }
+        catch
+        {
+            return default;
+        }
+    }
+
+    #endregion
+
+    #region Archivos .mboard
+
+    /// <summary>Guarda el board en un archivo del usuario. Devuelve el error si falló, o null si salió bien.</summary>
+    public static string? SaveTo(string path, LayoutNode root)
+    {
+        try
+        {
+            File.WriteAllText(path, JsonSerializer.Serialize(ToDto(root), Options));
+            return null;
+        }
+        catch (Exception ex)
+        {
+            // Acá SÍ se devuelve el error, a diferencia de la sesión: el usuario pidió guardar
+            // explícitamente y tiene que enterarse si no se pudo. Un "guardar" que falla en
+            // silencio es la peor mentira que le podés decir.
+            return ex.Message;
+        }
+    }
+
+    /// <summary>Carga un board desde un archivo. Devuelve null si no se pudo leer o parsear.</summary>
+    public static LayoutNode? LoadFrom(string path)
+    {
+        try
+        {
+            var dto = JsonSerializer.Deserialize<NodeDto>(File.ReadAllText(path), Options);
             return dto is null ? null : FromDto(dto);
         }
         catch
@@ -71,6 +132,8 @@ public static class BoardStore
             return null;
         }
     }
+
+    #endregion
 
     private static NodeDto ToDto(LayoutNode node) => node switch
     {
@@ -116,8 +179,7 @@ public static class BoardStore
 
         // El archivo pudo haberse movido, borrado, o estar en un disco externo desconectado.
         // NO se descarta: el sector queda marcado como "falta este archivo", conservando el path
-        // y los markers. Así se puede re-vincular sin volver a marcar la zona de loop, y el
-        // autoguardado al cerrar NO borra la referencia.
+        // y los markers. Así se puede re-vincular sin volver a marcar la zona de loop.
         if (!File.Exists(path))
         {
             sector.MarkMissing(path);
