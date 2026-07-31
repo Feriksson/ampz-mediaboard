@@ -29,13 +29,32 @@ El bump se deriva de los conventional commits que entran a `main` (`BREAKING CHA
 `feat:` → minor, el resto → patch) y **viaja EN la promoción**: commit `chore(release): vX.Y.Z`
 sobre `develop`, ANTES del merge a `main`. Nunca directo sobre `main`.
 
-Flujo de trabajo: se desarrolla en `develop`, se promociona a `main`.
+### ⚠ CADENCIA — un release NO es un commit (decisión del usuario, 2026-07-31)
 
-**Push automático (decisión del usuario, 2026-07-31)**: al cerrar un release NO hay que preguntar
-si subir. Se pushea derecho:
-```powershell
-git push origin main develop --follow-tags
-```
+| Rama | Cuándo | Versión |
+|---|---|---|
+| `develop` | **cada cambio**: se commitea y se pushea | **NO se toca** |
+| `main` | **SOLO cuando el usuario lo pide explícitamente** | ahí se bumpea, agregando todo lo acumulado |
+
+Disparadores para promocionar: *"cerrá release"*, *"sacá versión"*, *"promocioná a main"* o
+equivalente. **Sin pedido explícito NO se toca `main`, NO se bumpea y NO se taggea.**
+
+Esto se escribe porque ya se hizo mal: durante la primera sesión se promocionó a `main` en CADA
+cambio y salieron **cinco releases en una tarde** (v1.0.0 → v1.3.1). El error fue confundir
+"commitear" con "cortar un release": el protocolo dice *cuándo va el bump* (en la promoción),
+nunca dijo que había que promocionar en cada cambio.
+
+Por qué importa, más allá del ruido:
+- **La versión deja de significar algo.** Debe marcar un estado al que querrías volver, no "el
+  rato en que se tocó un archivo".
+- **La regla del bump está DISEÑADA para acumular**: toma todos los commits entre `main` y
+  `develop` y se queda con la señal más alta (un `feat:` entre veinte `fix:` → minor). Cortando
+  de a un commit, esa lógica no sirve para nada porque siempre hay uno solo para mirar.
+
+**Push automático**: no hay que preguntar si subir.
+- En cada cambio → `git push origin develop`
+- Al cerrar un release → `git push origin main develop --follow-tags`
+
 Remoto: `git@github.com:Feriksson/ampz-mediaboard.git`.
 
 ---
