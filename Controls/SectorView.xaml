@@ -1,0 +1,165 @@
+<UserControl x:Class="AmpzMediaBoard.Controls.SectorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vlc="clr-namespace:LibVLCSharp.WPF;assembly=LibVLCSharp.WPF"
+             xmlns:media="clr-namespace:AmpzMediaBoard.Media"
+             xmlns:ctl="clr-namespace:AmpzMediaBoard.Controls"
+             AllowDrop="True">
+
+    <Border x:Name="Frame" BorderThickness="2" CornerRadius="6" Margin="3"
+            Background="{DynamicResource SectorBrush}" BorderBrush="Transparent">
+        <Border.Style>
+            <Style TargetType="Border">
+                <Style.Triggers>
+                    <!-- El sector seleccionado es el que reciben los atajos y los botones de
+                         partir. Sin una marca visual clara, partís el sector equivocado. -->
+                    <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                        <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </Border.Style>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- ══ Cabecera ══
+                 Además de mostrar el nombre y los botones, es un DROP TARGET garantizado:
+                 el video se dibuja en una ventana hosteada (HWND) que puede tragarse los eventos
+                 de drop, pero la cabecera es WPF puro y siempre los recibe. Si algún día el drop
+                 sobre el video falla, esta barra sigue funcionando. -->
+            <Border Grid.Row="0" Background="{DynamicResource HeaderBrush}" CornerRadius="4,4,0,0" Padding="6,3">
+                <Grid>
+                    <TextBlock Text="{Binding Title}" Foreground="{DynamicResource TextBrush}"
+                               FontSize="11" VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis" Margin="0,0,96,0" />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="SplitVerticalButton" Content="&#x2502;" ToolTip="Partir en dos columnas"
+                                Style="{DynamicResource IconButton}" />
+                        <Button x:Name="SplitHorizontalButton" Content="&#x2500;" ToolTip="Partir en dos filas"
+                                Style="{DynamicResource IconButton}" />
+                        <Button x:Name="ClearButton" Content="&#x21BA;" ToolTip="Vaciar el sector"
+                                Style="{DynamicResource IconButton}" />
+                        <Button x:Name="CloseButton" Content="&#x2715;" ToolTip="Cerrar el sector"
+                                Style="{DynamicResource IconButton}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- ══ Área de media ══ -->
+            <Grid Grid.Row="1" Background="Black">
+                <vlc:VideoView x:Name="Video" Visibility="Collapsed" />
+
+                <Image x:Name="Still" Stretch="Uniform" Visibility="Collapsed"
+                       Source="{Binding ImageSource}" />
+
+                <!-- Estado vacío: no es decoración, es la única pista de CÓMO se usa la app. -->
+                <Border x:Name="EmptyHint" BorderThickness="1.5" CornerRadius="4" Margin="10"
+                        BorderBrush="{DynamicResource HintBorderBrush}">
+                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                        <TextBlock Text="&#x2B07;" FontSize="26" HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource HintBrush}" />
+                        <TextBlock Text="Arrastrá un video o una imagen" Margin="0,6,0,0"
+                                   Foreground="{DynamicResource HintBrush}" FontSize="12" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Archivo ausente: el board recuerda qué iba acá, pero el archivo no está.
+                     Se muestra el nombre Y el path completo a propósito — sin el path no sabés
+                     si el clip se borró o si simplemente el disco externo no está conectado. -->
+                <Border x:Name="MissingHint" Visibility="Collapsed" BorderThickness="1.5" CornerRadius="4"
+                        Margin="10" BorderBrush="{DynamicResource WarnBorderBrush}"
+                        Background="{DynamicResource WarnFillBrush}">
+                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="14">
+                        <TextBlock Text="&#x26A0;" FontSize="22" HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource WarnBrush}" />
+                        <TextBlock Text="No se encontró el archivo" Margin="0,4,0,0" FontSize="12"
+                                   HorizontalAlignment="Center" Foreground="{DynamicResource TextBrush}" />
+                        <TextBlock x:Name="MissingName" Margin="0,6,0,0" FontSize="11" FontWeight="SemiBold"
+                                   HorizontalAlignment="Center" Foreground="{DynamicResource WarnBrush}"
+                                   TextTrimming="CharacterEllipsis" MaxWidth="320" />
+                        <TextBlock x:Name="MissingFullPath" Margin="0,2,0,0" FontSize="9"
+                                   HorizontalAlignment="Center" Foreground="{DynamicResource HintBrush}"
+                                   TextTrimming="CharacterEllipsis" MaxWidth="340" />
+                        <Button x:Name="RelinkButton" Content="Buscar el archivo…" Margin="0,12,0,0"
+                                HorizontalAlignment="Center" Style="{DynamicResource ToolbarButton}" />
+                        <TextBlock Text="o arrastrá otro encima para reemplazarlo" Margin="0,8,0,0" FontSize="10"
+                                   HorizontalAlignment="Center" Foreground="{DynamicResource HintBrush}" />
+                        <TextBlock Text="Tus markers de loop se conservan" Margin="0,2,0,0" FontSize="9"
+                                   HorizontalAlignment="Center" Foreground="{DynamicResource HintBrush}"
+                                   FontStyle="Italic" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Velo de arrastre: se prende cuando hay un archivo válido encima.
+                     ⚠ IsHitTestVisible=False es OBLIGATORIO. Si el velo participa del hit-test,
+                     al aparecer se convierte ÉL MISMO en el elemento bajo el cursor → se dispara
+                     DragLeave → el velo se apaga → el DragOver siguiente lo vuelve a prender.
+                     Ese ciclo es el parpadeo. -->
+                <Border x:Name="DropVeil" Visibility="Collapsed" IsHitTestVisible="False"
+                        Background="{DynamicResource DropVeilBrush}"
+                        BorderBrush="{DynamicResource AccentBrush}" BorderThickness="2" CornerRadius="4">
+                    <TextBlock Text="Soltá acá" FontSize="15" FontWeight="SemiBold"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextBrush}" />
+                </Border>
+            </Grid>
+
+            <!-- ══ Transporte + zona de loop ══
+                 Solo aparece con video cargado: una imagen no tiene nada que reproducir. -->
+            <Grid x:Name="Transport" Grid.Row="2" Margin="6,4,6,6">
+                <Grid.Style>
+                    <Style TargetType="Grid">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding Kind}" Value="{x:Static media:MediaKind.Video}">
+                                <Setter Property="Visibility" Value="Visible" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Grid.Style>
+
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <StackPanel Grid.Row="0" Orientation="Horizontal">
+                    <!-- El estilo va como elemento (y no como atributo Style=) porque necesita un
+                         DataTrigger propio para alternar el glifo ▶/⏸ según IsPlaying. -->
+                    <Button x:Name="PlayButton" Width="34">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource TransportButton}">
+                                <Setter Property="Content" Value="&#x25B6;" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsPlaying}" Value="True">
+                                        <Setter Property="Content" Value="&#x23F8;" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+
+                    <ToggleButton x:Name="LoopButton" Content="LOOP" Margin="6,0,0,0"
+                                  IsChecked="{Binding LoopEnabled, Mode=TwoWay}"
+                                  Style="{DynamicResource LoopToggle}"
+                                  ToolTip="Reproducir solo dentro de la zona marcada" />
+
+                    <TextBlock x:Name="TimeLabel" VerticalAlignment="Center" Margin="10,0,0,0"
+                               FontFamily="Consolas" FontSize="11"
+                               Foreground="{DynamicResource DimTextBrush}" />
+                </StackPanel>
+
+                <ctl:LoopTimeline x:Name="Timeline" Grid.Row="1" Margin="0,2,0,0"
+                                  DurationMs="{Binding DurationMs, Mode=OneWay}"
+                                  PositionMs="{Binding PositionMs, Mode=OneWay}"
+                                  LoopStartMs="{Binding LoopStartMs, Mode=TwoWay}"
+                                  LoopEndMs="{Binding LoopEndMs, Mode=TwoWay}" />
+            </Grid>
+        </Grid>
+    </Border>
+</UserControl>

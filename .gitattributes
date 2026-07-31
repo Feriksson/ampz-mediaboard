@@ -1,0 +1,17 @@
+# Normalización de line endings: el repo guarda LF, el checkout en Windows respeta lo nativo.
+* text=auto eol=lf
+
+# Los archivos de proyecto de VS y los .bat quedan CRLF sí o sí (VS los reescribe si no).
+*.csproj text eol=crlf
+*.sln    text eol=crlf
+*.slnx   text eol=crlf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+
+# Binarios: que git no les toque nada.
+*.dll  binary
+*.exe  binary
+*.ico  binary
+*.png  binary
+*.jpg  binary
+*.mp4  binary

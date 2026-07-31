@@ -1,0 +1,40 @@
+<Window x:Class="AmpzMediaBoard.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Ampz MediaBoard" Height="760" Width="1280"
+        Icon="ampz-mediaboard.ico"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource WindowBrush}"
+        UseLayoutRounding="True">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- ══ Barra superior ══ -->
+        <Border Grid.Row="0" Background="#1A1A22" Padding="10,7">
+            <Grid>
+                <StackPanel Orientation="Horizontal">
+                    <Button x:Name="SplitVButton" Content="Partir &#x2502;" Style="{StaticResource ToolbarButton}"
+                            ToolTip="Partir el sector seleccionado en dos columnas" />
+                    <Button x:Name="SplitHButton" Content="Partir &#x2500;" Style="{StaticResource ToolbarButton}"
+                            ToolTip="Partir el sector seleccionado en dos filas" />
+                    <Border Width="1" Background="#2E2E3A" Margin="4,2,10,2" />
+                    <Button x:Name="SaveButton" Content="Guardar board" Style="{StaticResource ToolbarButton}"
+                            ToolTip="Ctrl+S — guarda layout, clips y markers de loop" />
+                    <Button x:Name="ResetButton" Content="Board nuevo" Style="{StaticResource ToolbarButton}"
+                            ToolTip="Vacía el board y arranca de un solo sector" />
+                </StackPanel>
+
+                <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center"
+                           Foreground="#5A5A6B" FontSize="10"
+                           Text="Espacio = play/pausa del sector seleccionado  ·  A / B = fijar markers de loop en el playhead" />
+            </Grid>
+        </Border>
+
+        <!-- Acá adentro se inyecta el BoardView, que materializa el árbol de layout. -->
+        <ContentControl x:Name="BoardHost" Grid.Row="1" Margin="4" />
+    </Grid>
+</Window>

@@ -1,0 +1,63 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- x64 fijo: libvlc.dll es nativa y viene solo para win-x64 en el paquete que usamos. -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>ampz-mediaboard.ico</ApplicationIcon>
+    <AssemblyTitle>Ampz MediaBoard</AssemblyTitle>
+    <Product>Ampz MediaBoard</Product>
+    <RootNamespace>AmpzMediaBoard</RootNamespace>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <!-- Perfil de RELEASE. Lo que NO está acá también es una decisión:
+       · PublishTrimmed  → NO. WPF resuelve tipos por reflexión desde XAML y LibVLCSharp usa
+         callbacks nativos; el trimmer se come cosas que nadie referencia estáticamente y el
+         error aparece recién en runtime, en la máquina del usuario.
+       · PublishSingleFile → NO. Core.Initialize() busca libvlc en <BaseDirectory>\libvlc\win-x64\,
+         y con single-file el directorio base es el de extracción → no encuentra los plugins. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <Optimize>true</Optimize>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <!-- ReadyToRun: precompila a nativo. Es puro arranque — la app abre notablemente más rápido
+         porque el JIT no tiene que compilar la UI entera en el primer frame. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <!-- Sin las carpetas de recursos satélite de cada idioma: la app es en español y punto. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- El .ico va también como Resource para que la VENTANA lo pueda usar por URI relativo.
+         ApplicationIcon solo se lo pone al .exe (Explorer, taskbar), no a la ventana WPF. -->
+    <Resource Include="ampz-mediaboard.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- OJO: los ImplicitUsings de un proyecto WPF NO incluyen System.IO (a diferencia de una
+         consola). Sin esto, Path/File/Directory no resuelven en NINGÚN archivo. Se declara acá
+         una sola vez en vez de repetir el using en media docena de archivos. -->
+    <Using Include="System.IO" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- LibVLCSharp.WPF arrastra LibVLCSharp. Elegido sobre FFME porque FFME está abandonado
+         (última estable 4.4.350 de 2021, clavada a FFmpeg 4.4); LibVLCSharp 3.10.0 declara
+         net10.0 explícito en su nuspec y lo mantiene VideoLAN. -->
+    <PackageReference Include="LibVLCSharp.WPF" Version="3.10.0" />
+    <!-- Los binarios nativos de VLC. El paquete los copia al output en libvlc\win-x64\ y
+         Core.Initialize() los encuentra solo desde ahí. -->
+    <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />
+    <!-- Source generators de MVVM: [ObservableProperty] / [RelayCommand]. Cero
+         INotifyPropertyChanged escrito a mano. -->
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+  </ItemGroup>
+
+</Project>

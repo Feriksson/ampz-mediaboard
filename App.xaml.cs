@@ -1,0 +1,65 @@
+using System.Windows;
+using System.Windows.Threading;
+using AmpzMediaBoard.Media;
+using AmpzMediaBoard.Persistence;
+
+namespace AmpzMediaBoard;
+
+public partial class App : Application
+{
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        // La app NUNCA se cae en silencio: cualquier excepción no manejada queda escrita junto
+        // al exe antes de morir. Con interop nativo de por medio (libvlc), un crash mudo es
+        // imposible de diagnosticar después.
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            LogCrash(args.ExceptionObject as Exception, "AppDomain");
+
+        DispatcherUnhandledException += (_, args) =>
+        {
+            LogCrash(args.Exception, "Dispatcher");
+            MessageBox.Show(
+                $"Se rompió algo:\n\n{args.Exception.Message}\n\nEl detalle quedó en:\n{AppPaths.CrashLog}",
+                "Ampz MediaBoard", MessageBoxButton.OK, MessageBoxImage.Error);
+            args.Handled = true; // Un error en un sector no se lleva puesto el board entero.
+        };
+
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            LogCrash(args.Exception, "Task");
+            args.SetObserved();
+        };
+
+        base.OnStartup(e);
+
+        new MainWindow().Show();
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        // El runtime de VLC se libera al final de todo: para este punto MainWindow ya soltó
+        // los MediaPlayer de cada sector. Liberarlo con players vivos deja hilos nativos
+        // decodificando sobre memoria que ya no existe.
+        VlcEngine.Shutdown();
+        base.OnExit(e);
+    }
+
+    private static void LogCrash(Exception? ex, string origin)
+    {
+        try
+        {
+            File.AppendAllText(AppPaths.CrashLog,
+                $"""
+
+                ===== {DateTime.Now:yyyy-MM-dd HH:mm:ss} [{origin}] =====
+                {ex}
+
+                """);
+        }
+        catch
+        {
+            // Si ni el log se puede escribir, no hay nada más que hacer: no vamos a tirar una
+            // excepción DESDE el handler de excepciones.
+        }
+    }
+}
