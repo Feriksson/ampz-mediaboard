@@ -338,8 +338,34 @@ El doble click llega como **argumento de línea de comandos** (`App.OnStartup` �
 `BoardFile.FromCommandLine`). Si hay un `.mboard` válido ahí, se abre ese en vez de restaurar la
 sesión.
 
-**Limitación conocida**: no hay instancia única. Doble click con la app ya abierta levanta una
-segunda ventana en vez de cargar el board en la existente.
+### ⚠ MULTI-INSTANCIA ES INTENCIONAL — no le pongas un mutex
+
+La app **no** es de instancia única, y eso es un requisito del usuario, no un descuido: correr
+**dos o más boards a la vez** (cada uno en su ventana, con sus clips reproduciendo) es un caso de
+uso buscado. Doble click en un `.mboard` con la app abierta levanta otra instancia, y así tiene
+que ser.
+
+**NO agregues un mutex global de instancia única** (la app hermana `ampz desktop booster` sí lo
+tiene, pero ahí el motivo es que dos hooks de teclado se pelearían — acá no aplica nada de eso).
+
+Consecuencia que SÍ hubo que resolver: todas las instancias comparten el mismo
+`%APPDATA%\board.json`, así que la última en cerrar pisaría la sesión de las demás.
+**Regla: la sesión le pertenece a la instancia que arrancó SIN archivo** (`MainWindow._openedFromFile`).
+Un board abierto desde un `.mboard` ya tiene su documento: no necesita el respaldo de sesión y no
+lo toca.
+
+### Cambios sin guardar
+
+Como un board abierto desde archivo ya no se respalda en la sesión, cerrarlo perdería los cambios
+en silencio. Por eso `ConfirmDiscardChanges` pregunta al cerrar (Guardar / No guardar / Cancelar).
+
+La detección **NO usa un flag "dirty"**: serializa el board actual y lo compara con el contenido
+del archivo (`BoardStore.Serialize`). Un flag obligaría a observar cada mutación posible —cargar un
+clip, mover un marker, partir un sector, arrastrar un splitter— y alcanza con que se escape UNA
+para que el aviso mienta. Comparar el resultado no se puede equivocar.
+
+Solo aplica con un `.mboard` abierto: un board sin archivo lo respalda la sesión, así que preguntar
+sería puro ruido.
 
 `BoardStore` serializa con **DTOs propios**, no con el árbol de dominio: `SectorNode` arrastra un
 MediaPlayer nativo, un BitmapImage y un puntero al padre (un ciclo) — nada de eso puede ni debe

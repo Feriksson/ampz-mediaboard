@@ -102,12 +102,48 @@ public static class BoardStore
 
     #region Archivos .mboard
 
+    /// <summary>
+    /// El board serializado tal cual se escribiría a un archivo.
+    ///
+    /// Existe para poder detectar cambios sin guardar COMPARANDO CONTRA EL ARCHIVO, en vez de
+    /// mantener un flag "dirty". Un flag obligaría a observar cada mutación posible (cargar un
+    /// clip, mover un marker, partir un sector, arrastrar un splitter…) y alcanza con que se
+    /// escape una para que el aviso mienta. Comparar el resultado no puede equivocarse.
+    /// </summary>
+    public static string Serialize(LayoutNode root) => JsonSerializer.Serialize(ToDto(root), Options);
+
+    /// <summary>
+    /// ¿El board en memoria coincide con lo que hay guardado en el archivo? Lo usa el aviso de
+    /// cambios sin guardar. Ante cualquier duda (archivo ilegible, corrupto) devuelve true: no
+    /// vamos a trabarle el cierre al usuario por un problema de disco.
+    ///
+    /// ⚠ El contenido del archivo se NORMALIZA antes de comparar (se deserializa y se vuelve a
+    /// serializar con las mismas opciones). Comparar el texto crudo sería sensible al FORMATO:
+    /// un `.mboard` escrito compacto, o por una versión anterior con otro formateo, se leería
+    /// como "modificado" sin que nadie haya tocado nada — y el usuario aprendería a ignorar el
+    /// aviso, que es la peor forma de romper una advertencia.
+    /// </summary>
+    public static bool MatchesFile(string path, LayoutNode root)
+    {
+        try
+        {
+            var dto = JsonSerializer.Deserialize<NodeDto>(File.ReadAllText(path), Options);
+            if (dto is null) return true;
+
+            return string.Equals(Serialize(root), JsonSerializer.Serialize(dto, Options), StringComparison.Ordinal);
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
     /// <summary>Guarda el board en un archivo del usuario. Devuelve el error si falló, o null si salió bien.</summary>
     public static string? SaveTo(string path, LayoutNode root)
     {
         try
         {
-            File.WriteAllText(path, JsonSerializer.Serialize(ToDto(root), Options));
+            File.WriteAllText(path, Serialize(root));
             return null;
         }
         catch (Exception ex)

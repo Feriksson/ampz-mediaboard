@@ -14,6 +14,19 @@ public partial class MainWindow : Window
     /// <summary>Archivo `.mboard` abierto, o null si el board todavía no se guardó en ninguno.</summary>
     private string? _currentFile;
 
+    /// <summary>
+    /// Esta instancia se abrió a partir de un archivo (doble click o argumento de línea de comandos).
+    ///
+    /// La app es MULTI-INSTANCIA A PROPÓSITO: correr dos boards a la vez es un caso de uso
+    /// buscado, no un descuido. Pero eso obliga a definir DE QUIÉN es la sesión, porque todas
+    /// las instancias comparten el mismo `%APPDATA%\board.json` y la última en cerrar pisaría a
+    /// las demás.
+    ///
+    /// Regla: **la sesión le pertenece a la instancia que arrancó SIN archivo.** Un board abierto
+    /// desde un `.mboard` ya tiene su documento — no necesita el respaldo de sesión y no lo toca.
+    /// </summary>
+    private readonly bool _openedFromFile;
+
     /// <param name="startupFile">
     /// Board a abrir al arrancar. Viene del doble click en Explorer (el shell nos pasa el path
     /// como argumento). Si es null, se restaura la sesión anterior.
@@ -21,6 +34,8 @@ public partial class MainWindow : Window
     public MainWindow(string? startupFile = null)
     {
         InitializeComponent();
+
+        _openedFromFile = startupFile is not null;
 
         if (startupFile is not null) OpenFile(startupFile);
         else RestoreSession();
@@ -43,13 +58,50 @@ public partial class MainWindow : Window
         // consume el botón (lo interpreta como "apretarme") y el atajo nunca llega acá.
         PreviewKeyDown += OnPreviewKeyDown;
 
+        Closing += OnClosing;
+    }
+
+    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (!ConfirmDiscardChanges())
+        {
+            e.Cancel = true;
+            return;
+        }
+
         // Al cerrar se guarda la SESIÓN (no el archivo .mboard). Son cosas distintas: la sesión
         // te salva de perder trabajo, el archivo es tu documento y solo se escribe cuando vos lo
         // pedís. Autoguardar sobre el archivo sería pisarle cambios al usuario sin permiso.
-        Closing += (_, _) =>
+        //
+        // Y solo la escribe la instancia que arrancó SIN archivo: ver _openedFromFile. Con la app
+        // corriendo en varias instancias a la vez, si todas guardaran, la última en cerrar
+        // pisaría a las demás y la sesión que restaurás sería la que quedó por azar.
+        if (!_openedFromFile) BoardStore.SaveSession(_board.Root, _currentFile);
+
+        _board.Dispose();
+    }
+
+    /// <summary>
+    /// Si hay cambios sin guardar sobre un archivo, pregunta qué hacer.
+    /// Devuelve false si el usuario decidió NO cerrar.
+    ///
+    /// Solo aplica cuando hay un `.mboard` abierto: un board sin archivo lo respalda la sesión,
+    /// así que cerrarlo no pierde nada y preguntar sería puro ruido.
+    /// </summary>
+    private bool ConfirmDiscardChanges()
+    {
+        if (_currentFile is null) return true;
+        if (BoardStore.MatchesFile(_currentFile, _board.Root)) return true;
+
+        var answer = MessageBox.Show(
+            $"El board \"{Path.GetFileNameWithoutExtension(_currentFile)}\" tiene cambios sin guardar.\n\n¿Guardarlos antes de cerrar?",
+            "Ampz MediaBoard", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+
+        return answer switch
         {
-            BoardStore.SaveSession(_board.Root, _currentFile);
-            _board.Dispose();
+            MessageBoxResult.Yes => BoardStore.SaveTo(_currentFile, _board.Root) is null,
+            MessageBoxResult.No => true,
+            _ => false, // Cancelar: se queda abierto.
         };
     }
 
