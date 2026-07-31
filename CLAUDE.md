@@ -208,6 +208,30 @@ Anotado como v2; NO está implementado.
 `LibVLC` se crea con `--no-input-fast-seek` (seek preciso, no por keyframe) para que los markers
 caigan donde los pusiste y no ~1s antes.
 
+### ⚠ NUNCA le asignes un valor local a una DP con binding OneWay
+
+Bug real, ya pasó: **la marca del playhead quedaba clavada** desde el primer click en el riel. El
+video seguía reproduciendo, pero la marca no se movía nunca más.
+
+`OnTrackClick` hacía `PositionMs = ms;` "para mover la marca al instante". En WPF, un binding se
+guarda **como el valor local** de la propiedad. Asignarle un valor local a una DP con binding
+**OneWay** REEMPLAZA la expresión de binding y la destruye para siempre — no se recupera sola.
+(Con `TwoWay` no pasa: ahí la asignación se propaga a la fuente y el binding sobrevive; por eso
+arrastrar los markers A/B, que sí están bindeados TwoWay, funcionaba bien.)
+
+Regla del control: **`LoopTimeline` no es dueña del tiempo, el reproductor lo es.** El click solo
+dispara `SeekRequested`; el dueño del sector hace el seek, el nodo actualiza su `PositionMs` y el
+valor vuelve por el binding en la misma vuelta del Dispatcher — no hace falta ningún atajo visual.
+Por eso `PositionMsProperty` **NO** lleva `BindsTwoWayByDefault` (a diferencia de
+`LoopStartMs`/`LoopEndMs`, que el control SÍ modifica al arrastrar).
+
+Test de regresión: `dotnet run` sobre `tools/LoopProbe` (referencia el proyecto real e invoca
+`OnTrackClick` por reflexión). Sale 0 si el binding sobrevive, 1 si volvió el bug.
+
+⚠ `tools/` está excluido del globbing del proyecto principal (`<Compile Remove="tools\**" />`).
+Sin eso, el `Program.cs` del probe entra al build de la app y falla con "el programa tiene más de
+un punto de entrada".
+
 ### Capa de render — el punto de migración
 
 **Todo lo que toca al `VideoView` vive en `Controls/SectorView.xaml.cs` y en ningún otro lado.**
