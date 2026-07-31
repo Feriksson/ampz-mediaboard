@@ -31,6 +31,13 @@ sobre `develop`, ANTES del merge a `main`. Nunca directo sobre `main`.
 
 Flujo de trabajo: se desarrolla en `develop`, se promociona a `main`.
 
+**Push automático (decisión del usuario, 2026-07-31)**: al cerrar un release NO hay que preguntar
+si subir. Se pushea derecho:
+```powershell
+git push origin main develop --follow-tags
+```
+Remoto: `git@github.com:Feriksson/ampz-mediaboard.git`.
+
 ---
 
 ## Stack & build
