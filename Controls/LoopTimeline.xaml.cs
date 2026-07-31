@@ -43,9 +43,20 @@ public partial class LoopTimeline : UserControl
         nameof(DurationMs), typeof(double), typeof(LoopTimeline),
         new FrameworkPropertyMetadata(0d, OnVisualPropertyChanged));
 
+    /// <summary>
+    /// ⚠ Esta propiedad es de SOLO LECTURA para el control: la timeline NO es dueña del tiempo,
+    /// el reproductor lo es. Por eso —a diferencia de LoopStart/LoopEnd— NO lleva
+    /// <c>BindsTwoWayByDefault</c>: un binding sin Mode explícito queda OneWay, que es lo correcto.
+    ///
+    /// NUNCA le asignes un valor desde adentro del control. En WPF, asignarle un valor LOCAL a
+    /// una DependencyProperty con binding OneWay **destruye la BindingExpression** (el valor
+    /// local tiene más precedencia y reemplaza la expresión). El binding no se recupera nunca
+    /// más: la marca del playhead queda clavada para siempre. Bug real, ya pasó una vez.
+    /// Para moverse, se dispara <see cref="SeekRequested"/> y el valor vuelve por el binding.
+    /// </summary>
     public static readonly DependencyProperty PositionMsProperty = DependencyProperty.Register(
         nameof(PositionMs), typeof(double), typeof(LoopTimeline),
-        new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.BindsTwoWayByDefault, OnVisualPropertyChanged));
+        new FrameworkPropertyMetadata(0d, OnVisualPropertyChanged));
 
     public static readonly DependencyProperty LoopStartMsProperty = DependencyProperty.Register(
         nameof(LoopStartMs), typeof(double), typeof(LoopTimeline),
@@ -155,9 +166,12 @@ public partial class LoopTimeline : UserControl
         // Si el click cayó sobre un marker, es el arranque de un arrastre, no una búsqueda.
         if (e.OriginalSource is Thumb || DurationMs <= 0) return;
 
-        var ms = XToMs(e.GetPosition(Root).X);
-        PositionMs = ms;
-        SeekRequested?.Invoke(this, ms);
+        // Se pide el seek y NADA MÁS. Acá había un `PositionMs = ms;` que parecía inofensivo
+        // ("muevo la marca al instante") y era el bug: al ser una asignación LOCAL sobre una DP
+        // con binding OneWay, mataba el binding y el playhead no se movía nunca más.
+        // No hace falta ningún atajo visual: el dueño del sector hace el seek, el reproductor
+        // actualiza su posición y el valor vuelve por el binding en la misma vuelta del Dispatcher.
+        SeekRequested?.Invoke(this, XToMs(e.GetPosition(Root).X));
         e.Handled = true;
     }
 }
