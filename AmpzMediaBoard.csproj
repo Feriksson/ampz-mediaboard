@@ -14,7 +14,7 @@
     <AssemblyTitle>Ampz MediaBoard</AssemblyTitle>
     <Product>Ampz MediaBoard</Product>
     <RootNamespace>AmpzMediaBoard</RootNamespace>
-    <Version>1.3.0</Version>
+    <Version>1.3.1</Version>
   </PropertyGroup>
 
   <!-- Perfil de RELEASE. Lo que NO está acá también es una decisión:
@@ -38,6 +38,16 @@
     <!-- El .ico va también como Resource para que la VENTANA lo pueda usar por URI relativo.
          ApplicationIcon solo se lo pone al .exe (Explorer, taskbar), no a la ventana WPF. -->
     <Resource Include="ampz-mediaboard.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- tools/ tiene su propio proyecto (LoopProbe, el test de regresion del playhead). Sin este
+         Remove, el globbing por defecto del SDK se traga su Program.cs y el build falla con
+         "el programa tiene más de un punto de entrada". -->
+    <Compile Remove="tools\**" />
+    <Page Remove="tools\**" />
+    <None Remove="tools\**" />
+    <Resource Remove="tools\**" />
   </ItemGroup>
 
   <ItemGroup>
