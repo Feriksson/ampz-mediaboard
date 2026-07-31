@@ -288,35 +288,38 @@ frame y listo. Mandándolo por VLC se anima Y queda la zona de loop funcionando 
 
 ---
 
-## Persistencia — DOS destinos que NO son lo mismo
+## Persistencia — ⚠ ARRANQUE LIMPIO, un solo destino
 
-Distinción central; si se mezclan, la app le pisa cambios al usuario:
+**La app NO guarda ningún estado propio. No escribe en `%APPDATA%`. No restaura nada al arrancar.**
+Abrir el ejecutable te da SIEMPRE un board vacío; la única forma de recuperar trabajo es abrir su
+archivo `.mboard`.
 
-| | Sesión | Archivo `.mboard` |
+Esto es una decisión explícita del usuario y **no un pendiente**. Hubo estado de sesión hasta
+v1.2.0 y se sacó a propósito. Antes de reintroducir cualquier cosa parecida (autoguardado, "último
+board", "recuperar sesión", lista de recientes que se abra sola), leé los tres motivos:
+
+1. **Es la misma regla que el usuario ya había fijado en su otra app.** El `CLAUDE.md` de
+   `ampz desktop booster` dice, textual: *"la sesión NUNCA se rellena del INI al arrancar. Ver
+   proyectos de ayer sin confirmar sería confuso."* Mismo criterio, mismo dueño.
+2. **La sesión era la CAUSA de la única regla rara del diseño.** Existía porque sí un
+   `_openedFromFile`, una regla de "de quién es la sesión" y un conflicto entre instancias.
+   Al sacarla, las tres desaparecieron solas. Cuando remover una feature borra tres reglas
+   especiales, esa feature estaba peleada con el diseño.
+3. **Los archivos `.mboard` ya resuelven el problema** que la sesión venía a resolver, y lo hacen
+   de forma explícita y predecible.
+
+⚠ **Lo que SÍ hay que conservar si alguna vez se toca esto**: sin sesión, cerrar / "Nuevo" /
+"Abrir" sobre un board con trabajo lo perdería en silencio. Por eso `ConfirmDiscardChanges` guarda
+las tres puertas. **Sacar la sesión sin ese aviso cambiaría "restaura cosas que no pediste" por
+"pierde cosas sin avisar", que es estrictamente peor.**
+
+**Limitación conocida y aceptada**: si la app se cuelga o la matan, el trabajo no guardado se
+pierde — no hay red de recuperación. Es el precio del arranque limpio y está asumido.
+
+| Archivo | Dónde | Contenido |
 |---|---|---|
-| Dónde | `%APPDATA%\AmpzMediaBoard\board.json` | Donde el usuario quiera |
-| Cuándo se escribe | **sola**, al cerrar la ventana | **solo** cuando el usuario guarda |
-| Para qué | que no pierdas el trabajo | es tu documento, con nombre |
-
-La sesión recuerda además **qué archivo estaba abierto** (`SessionDto.CurrentFile`), y al restaurar
-solo lo adopta **si todavía existe** — mostrar en el título un board que ya no está sería mentir
-sobre dónde va a escribir el próximo "Guardar".
-
-⚠ **Cerrar la app NO escribe sobre tu `.mboard`.** Autoguardar sobre el archivo pisaría cambios que
-el usuario tal vez no quería conservar. El archivo se escribe cuando él lo pide, y punto.
-
-⚠ El error de `SaveTo` **se devuelve y se muestra**, a diferencia del de la sesión que se traga en
-silencio. Un "guardar" que falla callado es la peor mentira posible: el usuario se va tranquilo
-creyendo que su trabajo está a salvo.
-
-`BoardStore.LoadSession` tiene fallback al formato viejo (un `NodeDto` pelado, sin envoltorio de
-sesión). Cinco líneas para que quien venía usando la app no pierda su board al actualizar.
-
-| Archivo | Contenido |
-|---|---|
-| `board.json` | Sesión: árbol de layout + archivo por sector + markers + `CurrentFile`. |
-| `*.mboard` | Board del usuario: el mismo árbol, sin el envoltorio de sesión. |
-| `ampz-crash.log` | Junto al **exe** (si %APPDATA% es lo que falla, ahí no escribiríamos). |
+| `*.mboard` | donde el usuario quiera | El único lugar donde vive un board: árbol de layout + archivo por sector + markers. |
+| `ampz-crash.log` | junto al **exe** | Si el problema fuera el acceso al perfil del usuario, en `%APPDATA%` no podríamos escribir. |
 
 ### La extensión `.mboard` y el doble click (`Persistence/BoardFile.cs`)
 
@@ -342,8 +345,7 @@ Después de escribir el registro se llama a `SHChangeNotify(SHCNE_ASSOCCHANGED)`
 nuevo tarda en aparecer en Explorer, o no aparece hasta reiniciarlo.
 
 El doble click llega como **argumento de línea de comandos** (`App.OnStartup` → `e.Args` →
-`BoardFile.FromCommandLine`). Si hay un `.mboard` válido ahí, se abre ese en vez de restaurar la
-sesión.
+`BoardFile.FromCommandLine`). Si hay un `.mboard` válido ahí se abre ese; si no, board vacío.
 
 ### ⚠ MULTI-INSTANCIA ES INTENCIONAL — no le pongas un mutex
 
@@ -355,24 +357,36 @@ que ser.
 **NO agregues un mutex global de instancia única** (la app hermana `ampz desktop booster` sí lo
 tiene, pero ahí el motivo es que dos hooks de teclado se pelearían — acá no aplica nada de eso).
 
-Consecuencia que SÍ hubo que resolver: todas las instancias comparten el mismo
-`%APPDATA%\board.json`, así que la última en cerrar pisaría la sesión de las demás.
-**Regla: la sesión le pertenece a la instancia que arrancó SIN archivo** (`MainWindow._openedFromFile`).
-Un board abierto desde un `.mboard` ya tiene su documento: no necesita el respaldo de sesión y no
-lo toca.
+Las instancias son **totalmente independientes**: sin estado de sesión compartido, no hay nada que
+puedan pisarse entre ellas. (Hasta v1.2.0 sí lo había y hubo que arbitrar de quién era la sesión;
+ese problema murió con la sesión.)
 
-### Cambios sin guardar
+### Cambios sin guardar (`MainWindow.ConfirmDiscardChanges`)
 
-Como un board abierto desde archivo ya no se respalda en la sesión, cerrarlo perdería los cambios
-en silencio. Por eso `ConfirmDiscardChanges` pregunta al cerrar (Guardar / No guardar / Cancelar).
+Es lo que hace SEGURO no tener sesión. Guarda **tres puertas** — cerrar la ventana, "Nuevo" y
+"Abrir" — y cubre **dos casos**:
 
-La detección **NO usa un flag "dirty"**: serializa el board actual y lo compara con el contenido
-del archivo (`BoardStore.Serialize`). Un flag obligaría a observar cada mutación posible —cargar un
-clip, mover un marker, partir un sector, arrastrar un splitter— y alcanza con que se escape UNA
-para que el aviso mienta. Comparar el resultado no se puede equivocar.
+| Estado del board | Qué hace |
+|---|---|
+| Con archivo `.mboard` | Compara contra el archivo; si difiere, avisa. |
+| Sin archivo, con contenido | Avisa que nunca se guardó. |
+| Sin archivo y vacío | No pregunta: no hay nada que perder. |
 
-Solo aplica con un `.mboard` abierto: un board sin archivo lo respalda la sesión, así que preguntar
-sería puro ruido.
+Diálogo Guardar / No guardar / Cancelar; Cancelar hace `e.Cancel = true` y la ventana se queda.
+Por eso `Save`, `SaveAs` y `Write` devuelven `bool`: si el guardado falla o el usuario cancela el
+diálogo de archivo, **no se puede dejar cerrar**.
+
+El último caso de la tabla no es un detalle: un aviso que salta cuando no hace falta es un aviso
+que el usuario aprende a ignorar, y ahí perdiste la advertencia para cuando importa de verdad.
+
+La detección **NO usa un flag "dirty"** (`BoardStore.MatchesFile`): serializa el board y lo compara
+contra el archivo. Un flag obligaría a observar cada mutación posible —cargar un clip, mover un
+marker, partir un sector, arrastrar un splitter— y alcanza con que se escape UNA para que el aviso
+mienta. Comparar el resultado no se puede equivocar.
+
+⚠ El contenido del archivo se **normaliza** antes de comparar (deserializar a DTO y re-serializar
+con las mismas opciones). Comparar texto crudo sería sensible al FORMATO: un `.mboard` escrito
+compacto se leería como "modificado" sin que nadie lo tocó.
 
 `BoardStore` serializa con **DTOs propios**, no con el árbol de dominio: `SectorNode` arrastra un
 MediaPlayer nativo, un BitmapImage y un puntero al padre (un ciclo) — nada de eso puede ni debe
