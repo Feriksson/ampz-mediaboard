@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Windows;
 using System.Windows.Input;
 using AmpzMediaBoard.Board;
@@ -19,6 +20,7 @@ public partial class MainWindow : Window
         if (BoardStore.Load() is { } saved) _board.ReplaceRoot(saved);
 
         BoardHost.Content = new BoardView(_board);
+        ShowVersion();
 
         SplitVButton.Click += (_, _) => SplitSelected(SplitOrientation.Horizontal);
         SplitHButton.Click += (_, _) => SplitSelected(SplitOrientation.Vertical);
@@ -37,6 +39,23 @@ public partial class MainWindow : Window
             _board.Save();
             _board.Dispose();
         };
+    }
+
+    /// <summary>
+    /// Pinta la versión en la barra, LEÍDA DEL ASSEMBLY en runtime.
+    ///
+    /// El número no se escribe acá ni en el XAML a propósito: la única fuente de verdad es
+    /// <c>&lt;Version&gt;</c> en el .csproj, de donde el SDK deriva la versión del assembly.
+    /// Tipearlo en la UI crearía un segundo número que tarde o temprano deja de coincidir con el
+    /// binario — y una versión que miente es peor que no mostrar ninguna.
+    ///
+    /// Se muestran solo Major.Minor.Patch: el cuarto componente (revision) siempre es 0 acá y
+    /// solo agrega ruido.
+    /// </summary>
+    private void ShowVersion()
+    {
+        var version = Assembly.GetExecutingAssembly().GetName().Version;
+        VersionLabel.Text = version is null ? string.Empty : $"v{version.Major}.{version.Minor}.{version.Build}";
     }
 
     private void SplitSelected(SplitOrientation orientation)

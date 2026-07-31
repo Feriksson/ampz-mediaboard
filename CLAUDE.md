@@ -13,6 +13,26 @@ código**: son dos apps independientes.
 
 ---
 
+## Este es un producto versionado
+
+```
+version_source:     AmpzMediaBoard.csproj → <Version>
+production_branch:  main
+```
+
+**Una fuente, un número.** `<Version>` en el `.csproj` es la ÚNICA verdad. De ahí el SDK deriva
+`AssemblyVersion` / `FileVersion` / `InformationalVersion`, y la UI la **lee del assembly en
+runtime** (`MainWindow.ShowVersion`) — nunca la escribe a mano. Si alguna vez encontrás el número
+tipeado en un segundo lugar, eso es **drift**: cableálo a la fuente en vez de bumpearlo dos veces.
+
+El bump se deriva de los conventional commits que entran a `main` (`BREAKING CHANGE`/`!` → major,
+`feat:` → minor, el resto → patch) y **viaja EN la promoción**: commit `chore(release): vX.Y.Z`
+sobre `develop`, ANTES del merge a `main`. Nunca directo sobre `main`.
+
+Flujo de trabajo: se desarrolla en `develop`, se promociona a `main`.
+
+---
+
 ## Stack & build
 
 - **.NET 10** (`net10.0-windows`), **WPF**. Sin WinForms.

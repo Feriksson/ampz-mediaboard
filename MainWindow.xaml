@@ -28,9 +28,15 @@
                             ToolTip="Vacía el board y arranca de un solo sector" />
                 </StackPanel>
 
-                <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center"
-                           Foreground="#5A5A6B" FontSize="10"
-                           Text="Espacio = play/pausa del sector seleccionado  ·  A / B = fijar markers de loop en el playhead" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <TextBlock Foreground="#5A5A6B" FontSize="10" VerticalAlignment="Center"
+                               Text="Espacio = play/pausa del sector seleccionado  ·  A / B = fijar markers de loop en el playhead" />
+                    <Border Width="1" Background="#2E2E3A" Margin="12,1,10,1" />
+                    <!-- El texto lo pone ShowVersion() leyendo el assembly. NO se escribe acá:
+                         la única fuente de verdad es <Version> en el .csproj. -->
+                    <TextBlock x:Name="VersionLabel" VerticalAlignment="Center"
+                               Foreground="#4A4A58" FontSize="10" FontFamily="Consolas" />
+                </StackPanel>
             </Grid>
         </Border>
 
