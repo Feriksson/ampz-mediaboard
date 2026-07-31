@@ -1,20 +1,18 @@
 namespace AmpzMediaBoard.Persistence;
 
 /// <summary>
-/// Toda la data del usuario vive en %APPDATA%\AmpzMediaBoard\, NUNCA junto al exe. El exe tiene
-/// que poder vivir en Program Files (donde no se escribe) o copiarse entre máquinas sin arrastrar
-/// el estado de nadie.
+/// Rutas fijas de la app.
+///
+/// Ojo con lo que NO está acá: **no hay carpeta de datos en `%APPDATA%`**. La app no guarda
+/// estado propio en ningún lado — el único lugar donde vive un board es su archivo `.mboard`,
+/// donde el usuario lo puso. Si alguna vez volvés a necesitar `%APPDATA%`, leé antes la sección
+/// "Arranque limpio" del CLAUDE.md: la ausencia de estado oculto es una decisión, no un olvido.
 /// </summary>
 public static class AppPaths
 {
-    public static string DataDir { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "AmpzMediaBoard");
-
-    public static string BoardFile => Path.Combine(DataDir, "board.json");
-
-    /// <summary>El log de crashes SÍ va junto al exe: si %APPDATA% es el que falla, ahí no escribiríamos.</summary>
+    /// <summary>
+    /// El log de crashes va junto al **exe** y no a `%APPDATA%`: si el problema fuera justamente
+    /// el acceso al perfil del usuario, ahí no podríamos escribir nada.
+    /// </summary>
     public static string CrashLog { get; } = Path.Combine(AppContext.BaseDirectory, "ampz-crash.log");
-
-    public static void EnsureDataDir() => Directory.CreateDirectory(DataDir);
 }

@@ -14,31 +14,18 @@ public partial class MainWindow : Window
     /// <summary>Archivo `.mboard` abierto, o null si el board todavía no se guardó en ninguno.</summary>
     private string? _currentFile;
 
-    /// <summary>
-    /// Esta instancia se abrió a partir de un archivo (doble click o argumento de línea de comandos).
-    ///
-    /// La app es MULTI-INSTANCIA A PROPÓSITO: correr dos boards a la vez es un caso de uso
-    /// buscado, no un descuido. Pero eso obliga a definir DE QUIÉN es la sesión, porque todas
-    /// las instancias comparten el mismo `%APPDATA%\board.json` y la última en cerrar pisaría a
-    /// las demás.
-    ///
-    /// Regla: **la sesión le pertenece a la instancia que arrancó SIN archivo.** Un board abierto
-    /// desde un `.mboard` ya tiene su documento — no necesita el respaldo de sesión y no lo toca.
-    /// </summary>
-    private readonly bool _openedFromFile;
-
     /// <param name="startupFile">
     /// Board a abrir al arrancar. Viene del doble click en Explorer (el shell nos pasa el path
-    /// como argumento). Si es null, se restaura la sesión anterior.
+    /// como argumento). Si es null, la app arranca con un board VACÍO.
+    ///
+    /// ⚠ NO se restaura ninguna sesión anterior, y es deliberado. Ver la sección
+    /// "Arranque limpio" del CLAUDE.md antes de agregar nada parecido.
     /// </param>
     public MainWindow(string? startupFile = null)
     {
         InitializeComponent();
 
-        _openedFromFile = startupFile is not null;
-
         if (startupFile is not null) OpenFile(startupFile);
-        else RestoreSession();
 
         BoardHost.Content = new BoardView(_board);
         ShowVersion();
@@ -51,7 +38,7 @@ public partial class MainWindow : Window
         NewButton.Click += (_, _) => NewBoard();
         OpenButton.Click += (_, _) => OpenWithDialog();
         SaveButton.Click += (_, _) => Save();
-        SaveAsButton.Click += (_, _) => SaveAs();
+        SaveAsButton.Click += (_, _) => _ = SaveAs();
         AssociateButton.Click += (_, _) => Associate();
 
         // PreviewKeyDown y no KeyDown: si el foco quedó en un botón, el KeyDown de Espacio lo
@@ -69,35 +56,44 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Al cerrar se guarda la SESIÓN (no el archivo .mboard). Son cosas distintas: la sesión
-        // te salva de perder trabajo, el archivo es tu documento y solo se escribe cuando vos lo
-        // pedís. Autoguardar sobre el archivo sería pisarle cambios al usuario sin permiso.
-        //
-        // Y solo la escribe la instancia que arrancó SIN archivo: ver _openedFromFile. Con la app
-        // corriendo en varias instancias a la vez, si todas guardaran, la última en cerrar
-        // pisaría a las demás y la sesión que restaurás sería la que quedó por azar.
-        if (!_openedFromFile) BoardStore.SaveSession(_board.Root, _currentFile);
-
+        // No se escribe NINGÚN estado al cerrar. El único lugar donde vive un board es su
+        // archivo .mboard, y ahí se escribe cuando el usuario lo pide.
         _board.Dispose();
     }
 
     /// <summary>
-    /// Si hay cambios sin guardar sobre un archivo, pregunta qué hacer.
-    /// Devuelve false si el usuario decidió NO cerrar.
+    /// Pregunta antes de perder trabajo. Devuelve false si el usuario decidió NO cerrar.
     ///
-    /// Solo aplica cuando hay un `.mboard` abierto: un board sin archivo lo respalda la sesión,
-    /// así que cerrarlo no pierde nada y preguntar sería puro ruido.
+    /// Cubre los DOS casos, y cubrir el segundo es lo que hace seguro no tener sesión:
+    ///  · board con archivo → se compara contra el archivo y se avisa si difiere;
+    ///  · board SIN archivo → si tiene algo adentro, se avisa que nunca se guardó.
+    ///
+    /// Sin el segundo caso, sacar la restauración de sesión habría cambiado "te restaura cosas
+    /// que no pediste" por "te pierde cosas sin avisar", que es estrictamente peor.
     /// </summary>
     private bool ConfirmDiscardChanges()
     {
-        if (_currentFile is null) return true;
+        if (_currentFile is null)
+        {
+            // Un board vacío no tiene nada que perder: preguntar sería puro ruido, y un aviso
+            // que salta cuando no hace falta es un aviso que el usuario aprende a ignorar.
+            if (IsBoardEmpty()) return true;
+
+            return MessageBox.Show(
+                "Este board no está guardado en ningún archivo.\n\n¿Guardarlo antes de cerrar?",
+                "Ampz MediaBoard", MessageBoxButton.YesNoCancel, MessageBoxImage.Question) switch
+            {
+                MessageBoxResult.Yes => SaveAs(),
+                MessageBoxResult.No => true,
+                _ => false,
+            };
+        }
+
         if (BoardStore.MatchesFile(_currentFile, _board.Root)) return true;
 
-        var answer = MessageBox.Show(
+        return MessageBox.Show(
             $"El board \"{Path.GetFileNameWithoutExtension(_currentFile)}\" tiene cambios sin guardar.\n\n¿Guardarlos antes de cerrar?",
-            "Ampz MediaBoard", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-
-        return answer switch
+            "Ampz MediaBoard", MessageBoxButton.YesNoCancel, MessageBoxImage.Question) switch
         {
             MessageBoxResult.Yes => BoardStore.SaveTo(_currentFile, _board.Root) is null,
             MessageBoxResult.No => true,
@@ -105,22 +101,21 @@ public partial class MainWindow : Window
         };
     }
 
+    /// <summary>
+    /// Board recién nacido: un solo sector, sin nada adentro. Si el usuario partió la pantalla
+    /// o cargó un clip, eso YA es trabajo y merece el aviso.
+    /// </summary>
+    private bool IsBoardEmpty() =>
+        _board.Root is SectorNode { Kind: Media.MediaKind.None, MissingPath: null };
+
     #region Archivos de board
-
-    private void RestoreSession()
-    {
-        var session = BoardStore.LoadSession();
-        if (session.Root is not null) _board.ReplaceRoot(session.Root);
-
-        // El archivo recordado solo se adopta si TODAVÍA existe: mostrar en el título un board
-        // que ya no está sería mentir sobre dónde va a escribir el próximo "Guardar".
-        _currentFile = session.CurrentFile is not null && File.Exists(session.CurrentFile)
-            ? session.CurrentFile
-            : null;
-    }
 
     private void NewBoard()
     {
+        // Mismo guard que al cerrar: sin sesión de respaldo, descartar el board actual sin
+        // avisar sería perder trabajo en silencio. Vale para "Nuevo" y para "Abrir".
+        if (!ConfirmDiscardChanges()) return;
+
         _board.ReplaceRoot(new SectorNode());
         _currentFile = null;
         UpdateTitle();
@@ -128,6 +123,8 @@ public partial class MainWindow : Window
 
     private void OpenWithDialog()
     {
+        if (!ConfirmDiscardChanges()) return;
+
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
             Title = "Abrir board",
@@ -155,19 +152,15 @@ public partial class MainWindow : Window
         UpdateTitle();
     }
 
-    /// <summary>Guarda en el archivo actual; si todavía no hay ninguno, se comporta como "Guardar como".</summary>
-    private void Save()
-    {
-        if (_currentFile is null)
-        {
-            SaveAs();
-            return;
-        }
+    /// <summary>
+    /// Guarda en el archivo actual; si todavía no hay ninguno, se comporta como "Guardar como".
+    /// Devuelve true si el board quedó guardado — el aviso de cierre depende de ese dato para
+    /// saber si puede dejar cerrar la ventana.
+    /// </summary>
+    private bool Save() => _currentFile is null ? SaveAs() : Write(_currentFile);
 
-        Write(_currentFile);
-    }
-
-    private void SaveAs()
+    /// <summary>Devuelve false si el usuario canceló el diálogo o si el guardado falló.</summary>
+    private bool SaveAs()
     {
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
@@ -180,12 +173,12 @@ public partial class MainWindow : Window
                 : "board" + BoardFile.Extension,
         };
 
-        if (dialog.ShowDialog() != true) return;
+        if (dialog.ShowDialog() != true) return false;
 
-        Write(BoardFile.EnsureExtension(dialog.FileName));
+        return Write(BoardFile.EnsureExtension(dialog.FileName));
     }
 
-    private void Write(string path)
+    private bool Write(string path)
     {
         var error = BoardStore.SaveTo(path, _board.Root);
         if (error is not null)
@@ -194,11 +187,12 @@ public partial class MainWindow : Window
             // se va tranquilo creyendo que su trabajo está a salvo.
             MessageBox.Show($"No se pudo guardar el board:\n\n{error}",
                 "Ampz MediaBoard", MessageBoxButton.OK, MessageBoxImage.Error);
-            return;
+            return false;
         }
 
         _currentFile = path;
         UpdateTitle();
+        return true;
     }
 
     private void Associate()
