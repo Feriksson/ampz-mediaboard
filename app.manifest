@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="1.0.0.0" name="AmpzMediaBoard.app" />
+  <!-- assemblyIdentity va OMITIDO a propósito (el template de VS también lo trae comentado).
+       Llevaba un version="1.0.0.0" escrito a mano = un SEGUNDO número de versión que este archivo
+       no puede leer del .csproj. Un día bumpeás la versión, este se queda atrás, y tenés dos
+       versiones distintas para el mismo binario. La única fuente de verdad es <Version> en
+       AmpzMediaBoard.csproj. Este manifest solo declara DPI y supportedOS, que no necesitan
+       identidad de assembly. -->
+  <!-- <assemblyIdentity version="1.0.0.0" name="AmpzMediaBoard.app" /> -->
 
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
