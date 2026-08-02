@@ -78,6 +78,38 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     public bool HasMedia => Kind != MediaKind.None;
 
     /// <summary>
+    /// Volumen del sector, 0..100. Es POR SECTOR y no global: en un board con varios clips
+    /// corriendo, lo normal es querer escuchar uno solo y tener el resto de fondo o en silencio.
+    /// </summary>
+    [ObservableProperty] private int _volume = 100;
+
+    /// <summary>
+    /// Silencio del sector. Va aparte del volumen a propósito: mutear y volver NO te hace
+    /// perder el nivel que habías ajustado, que es lo que pasaría si mutear fuera "volumen a 0".
+    /// </summary>
+    [ObservableProperty] private bool _isMuted;
+
+    partial void OnVolumeChanged(int value) => ApplyAudio();
+
+    partial void OnIsMutedChanged(bool value) => ApplyAudio();
+
+    /// <summary>
+    /// Empuja volumen y mute al reproductor.
+    ///
+    /// ⚠ VLC no acepta el volumen hasta que la salida de audio existe, y esa salida se crea
+    /// recién cuando el input abrió. Por eso esto se llama en TRES momentos: al cambiar la
+    /// propiedad, al arrancar la reproducción, y en el tick donde la duración se conoce por
+    /// primera vez (que es la señal de que el media ya abrió de verdad). Llamarlo una sola vez
+    /// al cargar deja el nivel sin aplicar y el sector suena siempre a 100.
+    /// </summary>
+    private void ApplyAudio()
+    {
+        if (Player is null) return;
+        Player.Volume = Math.Clamp(Volume, 0, 100);
+        Player.Mute = IsMuted;
+    }
+
+    /// <summary>
     /// Carga un archivo en el sector, reemplazando lo que hubiera.
     /// <paramref name="startAtMs"/> arranca el clip desde ese punto (lo usa el re-montaje al
     /// reconstruir el layout).
@@ -151,6 +183,57 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         media.Dispose();
 
         IsPlaying = true;
+        ApplyAudio();
+    }
+
+    /// <summary>
+    /// Foto de lo que hace único a este sector: el media y todos sus ajustes. Se usa para
+    /// MOVER contenido de un sector a otro arrastrando.
+    ///
+    /// Se mueve la DESCRIPCIÓN del media, no el MediaPlayer: un reproductor de VLC está atado a
+    /// la ventana de salida donde arrancó, así que pasarlo de un sector a otro lo dejaría
+    /// dibujando en el HWND equivocado (mismo motivo por el que existe Remount). Recargar el
+    /// clip en destino cuesta un re-decode, y es una acción deliberada del usuario: se banca.
+    /// </summary>
+    public readonly record struct MediaSnapshot(
+        string? Path,
+        string? MissingPath,
+        double PositionMs,
+        double LoopStartMs,
+        double LoopEndMs,
+        bool LoopEnabled,
+        int Volume,
+        bool IsMuted);
+
+    public MediaSnapshot TakeSnapshot() => new(
+        MediaPath, MissingPath, PositionMs, LoopStartMs, LoopEndMs, LoopEnabled, Volume, IsMuted);
+
+    /// <summary>Aplica una foto tomada con <see cref="TakeSnapshot"/>. Vacía el sector si la foto está vacía.</summary>
+    public void Restore(MediaSnapshot snapshot)
+    {
+        Unload();
+
+        Volume = snapshot.Volume;
+        IsMuted = snapshot.IsMuted;
+
+        if (snapshot.MissingPath is { Length: > 0 } missing)
+        {
+            MarkMissing(missing);
+        }
+        else if (snapshot.Path is { Length: > 0 } path)
+        {
+            // Se retoma desde donde iba: mover un clip de celda no debería costarte el punto
+            // en el que estabas mirando.
+            Load(path, snapshot.PositionMs);
+        }
+        else
+        {
+            return; // La foto estaba vacía: el sector queda vacío y listo.
+        }
+
+        LoopStartMs = snapshot.LoopStartMs;
+        LoopEndMs = snapshot.LoopEndMs;
+        LoopEnabled = snapshot.LoopEnabled;
     }
 
     private void LoadImage(string path)
@@ -329,6 +412,10 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         {
             DurationMs = length;
             if (LoopEndMs <= LoopStartMs) LoopEndMs = length;
+
+            // El media acaba de abrir de verdad: recién ahora VLC tiene salida de audio y
+            // acepta el volumen. Ver ApplyAudio.
+            ApplyAudio();
         }
 
         var ended = player.State is VLCState.Ended or VLCState.Stopped;

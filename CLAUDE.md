@@ -315,6 +315,51 @@ Las cuatro **desaparecen** al migrar a custom rendering (`WriteableBitmap`): sin
 ventana propia de VLC, ni ventana de overlay, ni re-montaje al re-parentar, ni airspace tragándose
 los eventos de drop.
 
+### Mover media entre sectores = INTERCAMBIAR (`BoardViewModel.SwapMedia`)
+
+Arrastrando la **cabecera** de un sector se mueve su media a otro. Y es un **swap**, no un
+"mover y vaciar el origen", por una razón concreta: soltar sobre un sector OCUPADO tiene que
+**reacomodar, no destruir**. Con "mover" a secas, el clip del destino se borraría en silencio — y
+el que está reordenando su board no pidió borrar nada. Si el destino está vacío, el swap ES un
+movimiento simple.
+
+Lo que viaja es la **descripción** del media (`SectorNode.MediaSnapshot`: path, posición, markers,
+volumen, mute), NO el `MediaPlayer`. Un reproductor de VLC está atado a la ventana de salida donde
+arrancó: pasarlo de un sector a otro lo dejaría dibujando en el HWND equivocado — el mismo motivo
+por el que existe `Remount`. Se recarga el clip en destino **desde la posición en la que iba**
+(vía `:start-time`), que cuesta un re-decode y es una acción deliberada del usuario.
+
+⚠ Las DOS fotos se toman ANTES de restaurar ninguna. Restaurar sobre un nodo lo modifica; sacar la
+segunda foto después leería el contenido recién puesto y terminarías con el mismo clip duplicado
+en los dos sectores.
+
+**El asa de arrastre es la cabecera**, no el área de video: esa área es un HWND hosteado y
+arrastrar desde ahí es poco confiable. Además hay umbral de arrastre (`SystemParameters.Minimum*
+DragDistance`) y los botones de la cabecera están excluidos — sin eso, el menor temblor del mouse
+convertiría "cerrar sector" en "mover el clip".
+
+⚠ El nodo de origen viaja en un **campo estático** (`SectorView._dragSource`), NO adentro del
+`DataObject`. El DataObject de WPF está pensado para cruzar procesos y envuelve lo que le metas en
+COM; con objetos vivos y no serializables (y `SectorNode` arrastra un MediaPlayer nativo) eso es
+pedir problemas. El arrastre nunca sale de esta ventana, así que un campo estático es más simple y
+no puede fallar. Se limpia en un `finally` porque `DoDragDrop` es bloqueante y un origen colgado
+haría que el próximo arrastre mueva el clip equivocado.
+
+### Audio por sector
+
+Volumen (`0..100`) y silencio son **por sector**, no globales: en un board con varios clips
+corriendo lo normal es querer escuchar UNO y tener el resto de fondo o mudo. Ambos se persisten en
+el `.mboard` y viajan con el clip al intercambiarlo.
+
+**El mute va aparte del volumen, y no es "volumen a 0"**: así silenciar y volver no te hace perder
+el nivel que habías ajustado. Se usa `MediaPlayer.Mute`, que es justo para eso.
+
+⚠ **VLC no acepta el volumen hasta que existe la salida de audio**, y esa salida se crea recién
+cuando el input abrió. Por eso `SectorNode.ApplyAudio` se llama en **TRES** momentos: al cambiar la
+propiedad, en `StartPending` (después del `Play`), y en el tick donde la duración se conoce por
+primera vez — que es la señal de que el media abrió de verdad. Llamarlo una sola vez al cargar deja
+el nivel sin aplicar y el sector suena siempre a 100.
+
 ### Drag & drop y el HWND
 
 La **cabecera de cada sector es un drop target garantizado** (WPF puro). Existe a propósito como
@@ -496,7 +541,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Scripts de mantenimiento: `make-ico.ps1` (regenerar el ícono desde el PNG) y `test-missing.ps1` (prueba end-to-end del archivo ausente). |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia). `LoopProbe/` y `BoardProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores y la persistencia del audio. Salen con código 0/1. |
 | raíz | `App`, `MainWindow`, `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---

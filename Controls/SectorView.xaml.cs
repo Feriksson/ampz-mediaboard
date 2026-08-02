@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using AmpzMediaBoard.Board;
 using AmpzMediaBoard.Layout;
@@ -20,6 +22,22 @@ namespace AmpzMediaBoard.Controls;
 /// </summary>
 public partial class SectorView : UserControl
 {
+    /// <summary>
+    /// Formato del arrastre ENTRE sectores. Solo marca "esto es un movimiento de media"; el nodo
+    /// de origen viaja por <see cref="_dragSource"/>.
+    ///
+    /// ¿Por qué no meter el nodo adentro del DataObject? Porque el DataObject de WPF está pensado
+    /// para cruzar procesos y envuelve lo que le metas en COM; con objetos vivos y no
+    /// serializables (y SectorNode arrastra un MediaPlayer nativo) eso es pedir problemas. Como
+    /// el arrastre nunca sale de esta ventana, un campo estático es más simple y no puede fallar.
+    /// </summary>
+    private const string SectorMediaFormat = "AmpzMediaBoard.SectorMedia";
+
+    private static SectorNode? _dragSource;
+
+    private Point _dragOrigin;
+    private bool _dragArmed;
+
     private SectorNode? _node;
 
     /// <summary>Lo inyecta <c>BoardView</c> al crear la vista. Es quien sabe partir y cerrar sectores.</summary>
@@ -50,10 +68,68 @@ public partial class SectorView : UserControl
         // existiera).
         Video.Loaded += (_, _) => StartWhenSurfaceReady();
 
+        // La cabecera es el asa para mover el media a otro sector.
+        Header.PreviewMouseLeftButtonDown += OnHeaderMouseDown;
+        Header.PreviewMouseMove += OnHeaderMouseMove;
+        Header.PreviewMouseLeftButtonUp += (_, _) => _dragArmed = false;
+
         DragOver += OnDragOver;
         DragLeave += OnDragLeave;
         Drop += OnDrop;
     }
+
+    #region Arrastre del media entre sectores
+
+    private void OnHeaderMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        // Un click sobre los botones de la cabecera (partir, desvincular, cerrar) NO arma un
+        // arrastre: si lo hiciera, el más mínimo temblor del mouse convertiría "cerrar sector"
+        // en "mover el clip a otro lado".
+        if (e.OriginalSource is DependencyObject source && FindAncestor<ButtonBase>(source) is not null) return;
+
+        _dragOrigin = e.GetPosition(this);
+        _dragArmed = true;
+    }
+
+    private void OnHeaderMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_dragArmed || e.LeftButton != MouseButtonState.Pressed) return;
+        if (_node is null || (!_node.HasMedia && !_node.IsMissing)) return;
+
+        // Se espera a superar el umbral del sistema antes de arrancar el arrastre. Sin esto,
+        // cualquier click con un pixel de movimiento se convierte en un drag y la cabecera se
+        // vuelve imposible de clickear.
+        var current = e.GetPosition(this);
+        if (Math.Abs(current.X - _dragOrigin.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(current.Y - _dragOrigin.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+
+        _dragArmed = false;
+        _dragSource = _node;
+
+        try
+        {
+            DragDrop.DoDragDrop(this, new DataObject(SectorMediaFormat, string.Empty), DragDropEffects.Move);
+        }
+        finally
+        {
+            // DoDragDrop es BLOQUEANTE: recién vuelve cuando el usuario soltó o canceló con Esc.
+            // El finally garantiza que el origen se limpie incluso si el drop tiró una excepción,
+            // porque un _dragSource colgado haría que el próximo arrastre mueva el clip equivocado.
+            _dragSource = null;
+        }
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? node) where T : DependencyObject
+    {
+        while (node is not null)
+        {
+            if (node is T match) return match;
+            node = VisualTreeHelper.GetParent(node);
+        }
+        return null;
+    }
+
+    #endregion
 
     private void Split(SplitOrientation orientation)
     {
@@ -203,10 +279,24 @@ public partial class SectorView : UserControl
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
+        // Dos arrastres distintos caen acá: archivos desde Explorer, y media de OTRO sector.
+        if (e.Data.GetDataPresent(SectorMediaFormat))
+        {
+            var moving = _dragSource is not null && !ReferenceEquals(_dragSource, _node);
+            e.Effects = moving ? DragDropEffects.Move : DragDropEffects.None;
+            DropVeil.Visibility = moving ? Visibility.Visible : Visibility.Collapsed;
+            DropVeilText.Text = _node is { HasMedia: true } or { IsMissing: true }
+                ? "Intercambiar"
+                : "Mover acá";
+            e.Handled = true;
+            return;
+        }
+
         var accepted = FirstSupported(e) is not null;
 
         e.Effects = accepted ? DragDropEffects.Copy : DragDropEffects.None;
         DropVeil.Visibility = accepted ? Visibility.Visible : Visibility.Collapsed;
+        DropVeilText.Text = "Soltá acá";
 
         // Handled=true corta la burbuja hacia arriba: sin esto, el sector padre y la ventana
         // también procesarían el mismo arrastre y el archivo podría caer en el sector equivocado.
@@ -232,6 +322,16 @@ public partial class SectorView : UserControl
     private void OnDrop(object sender, DragEventArgs e)
     {
         DropVeil.Visibility = Visibility.Collapsed;
+
+        // Movimiento de media entre sectores: intercambia contenidos. Ver BoardViewModel.SwapMedia.
+        if (e.Data.GetDataPresent(SectorMediaFormat))
+        {
+            if (_dragSource is { } origin && _node is not null && !ReferenceEquals(origin, _node))
+                Board?.SwapMedia(origin, _node);
+
+            e.Handled = true;
+            return;
+        }
 
         var path = FirstSupported(e);
         if (path is null || _node is null) return;

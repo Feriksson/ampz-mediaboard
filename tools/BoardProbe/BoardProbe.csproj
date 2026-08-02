@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Pruebas de MODELO del board (no tocan UI ni VLC):
+      · intercambio de media entre sectores al arrastrar
+      · persistencia del volumen y el silencio en el .mboard
+
+    Como se corre: ver el README de tools/ (un comentario XML no puede llevar dos guiones
+    seguidos, asi que el comando no va aca). Sale 0 si pasa todo, 1 si algo fallo.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>BoardProbe</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\AmpzMediaBoard.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -32,8 +32,13 @@
                  el video se dibuja en una ventana hosteada (HWND) que puede tragarse los eventos
                  de drop, pero la cabecera es WPF puro y siempre los recibe. Si algún día el drop
                  sobre el video falla, esta barra sigue funcionando. -->
-            <Border Grid.Row="0" Background="{DynamicResource HeaderBrush}" CornerRadius="4,4,0,0" Padding="6,3">
+            <Border x:Name="Header" Grid.Row="0" Background="{DynamicResource HeaderBrush}"
+                    CornerRadius="4,4,0,0" Padding="6,3">
                 <Grid>
+                    <!-- La cabecera es tambien el ASA DE ARRASTRE para mover el media a otro
+                         sector. Se eligio la cabecera y no el area de video porque esa area es
+                         un HWND hosteado: arrastrar desde ahi es poco confiable. Ademas evita
+                         que un click cualquiera sobre el video se interprete como arrastre. -->
                     <TextBlock Text="{Binding Title}" Foreground="{DynamicResource TextBrush}"
                                FontSize="11" VerticalAlignment="Center"
                                TextTrimming="CharacterEllipsis" Margin="0,0,96,0" />
@@ -42,7 +47,10 @@
                                 Style="{DynamicResource IconButton}" />
                         <Button x:Name="SplitHorizontalButton" Content="&#x2500;" ToolTip="Partir en dos filas"
                                 Style="{DynamicResource IconButton}" />
-                        <Button x:Name="ClearButton" Content="&#x21BA;" ToolTip="Vaciar el sector"
+                        <!-- Desvincular el media. El glifo era ↺ y se leia como "recargar" o
+                             "deshacer"; ⏏ (expulsar) dice lo que hace sin tener que leer nada. -->
+                        <Button x:Name="ClearButton" Content="&#x23CF;" FontFamily="Segoe UI Symbol"
+                                ToolTip="Desvincular el media (el sector queda vacío)"
                                 Style="{DynamicResource IconButton}" />
                         <Button x:Name="CloseButton" Content="&#x2715;" ToolTip="Cerrar el sector"
                                 Style="{DynamicResource IconButton}" />
@@ -103,7 +111,9 @@
                 <Border x:Name="DropVeil" Visibility="Collapsed" IsHitTestVisible="False"
                         Background="{DynamicResource DropVeilBrush}"
                         BorderBrush="{DynamicResource AccentBrush}" BorderThickness="2" CornerRadius="4">
-                    <TextBlock Text="Soltá acá" FontSize="15" FontWeight="SemiBold"
+                    <!-- El texto lo pone OnDragOver: cambia según lo que estés arrastrando
+                         (un archivo nuevo, o media de otro sector que va a intercambiarse). -->
+                    <TextBlock x:Name="DropVeilText" Text="Soltá acá" FontSize="15" FontWeight="SemiBold"
                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                Foreground="{DynamicResource TextBrush}" />
                 </Border>
@@ -148,6 +158,21 @@
                                   IsChecked="{Binding LoopEnabled, Mode=TwoWay}"
                                   Style="{DynamicResource LoopToggle}"
                                   ToolTip="Reproducir solo dentro de la zona marcada" />
+
+                    <!-- ══ Audio del sector ══
+                         El mute va SEPARADO del volumen (y no es "volumen a 0") para que
+                         silenciar y volver no te haga perder el nivel que ajustaste. En un board
+                         con varios clips corriendo, mutear es la acción más frecuente de las dos:
+                         por eso es un botón de un click y no un arrastre al extremo del slider. -->
+                    <ToggleButton x:Name="MuteButton" Margin="6,0,0,0" Width="30"
+                                  IsChecked="{Binding IsMuted, Mode=TwoWay}"
+                                  Style="{DynamicResource MuteToggle}"
+                                  ToolTip="Silenciar este sector" />
+                    <Slider x:Name="VolumeSlider" Width="66" Margin="4,0,0,0" VerticalAlignment="Center"
+                            Minimum="0" Maximum="100" SmallChange="5" LargeChange="10"
+                            Value="{Binding Volume, Mode=TwoWay}"
+                            Style="{DynamicResource VolumeSlider}"
+                            ToolTip="Volumen de este sector" />
 
                     <TextBlock x:Name="TimeLabel" VerticalAlignment="Center" Margin="10,0,0,0"
                                FontFamily="Consolas" FontSize="11"

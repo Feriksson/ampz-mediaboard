@@ -45,6 +45,8 @@ public static class BoardStore
         public double LoopStart { get; set; }
         public double LoopEnd { get; set; }
         public bool LoopEnabled { get; set; } = true;
+        public int Volume { get; set; } = 100;
+        public bool Muted { get; set; }
     }
 
     #region Archivos .mboard
@@ -137,6 +139,8 @@ public static class BoardStore
             LoopStart = sector.LoopStartMs,
             LoopEnd = sector.LoopEndMs,
             LoopEnabled = sector.LoopEnabled,
+            Volume = sector.Volume,
+            Muted = sector.IsMuted,
         },
         _ => new NodeDto(),
     };
@@ -156,7 +160,13 @@ public static class BoardStore
             return new SplitNode(orientation, FromDto(dto.First), FromDto(dto.Second), ratio);
         }
 
-        var sector = new SectorNode { LoopEnabled = dto.LoopEnabled };
+        var sector = new SectorNode
+        {
+            LoopEnabled = dto.LoopEnabled,
+            // Saneado: un board editado a mano con volumen 300 dejaría el sector fuera de rango.
+            Volume = Math.Clamp(dto.Volume, 0, 100),
+            IsMuted = dto.Muted,
+        };
 
         if (dto.Path is not { Length: > 0 } path) return sector;
 

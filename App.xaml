@@ -106,6 +106,100 @@
             </Setter>
         </Style>
 
+        <!-- ══ Toggle de silencio del sector ══
+             Los glifos salen de Segoe MDL2 Assets (viene con Windows 10/11): E767 = altavoz,
+             E74F = altavoz tachado. Se usa una fuente de íconos del sistema y no un emoji
+             porque el emoji lo renderiza a color y de tamaño impredecible según la fuente
+             que le toque, y acá queremos un ícono monocromo que siga al Foreground. -->
+        <Style x:Key="MuteToggle" TargetType="ToggleButton">
+            <Setter Property="Height" Value="24" />
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Content" Value="&#xE767;" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Bg" Background="#2E2E3A" CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter Property="Content" Value="&#xE74F;" />
+                                <!-- Silenciado se pinta ámbar, no rojo: no es un error, es un
+                                     estado que elegiste. Mismo criterio que el archivo ausente. -->
+                                <Setter Property="Foreground" Value="{StaticResource WarnBrush}" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="#3D3D4C" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ══ Slider de volumen ══
+             Template propio y mínimo: el Slider por defecto de WPF trae marcas, un thumb
+             gigante y colores claros que no pegan ni un poco con el board oscuro. -->
+        <Style x:Key="VolumeSlider" TargetType="Slider">
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="IsMoveToPointEnabled" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Grid Height="24" Background="Transparent">
+                            <Border Height="4" CornerRadius="2" VerticalAlignment="Center"
+                                    Background="{StaticResource TrackBrush}" />
+                            <!-- PART_SelectionRange pinta el tramo lleno; Slider lo maneja solo
+                                 con IsSelectionRangeEnabled. Acá se resuelve con un Track normal
+                                 y el relleno queda implícito en la posición del thumb: menos
+                                 piezas y alcanza para leer el nivel de un vistazo. -->
+                            <Track x:Name="PART_Track">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Command="Slider.DecreaseLarge">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Border Height="4" CornerRadius="2" VerticalAlignment="Center"
+                                                        Background="{StaticResource AccentBrush}" />
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.DecreaseRepeatButton>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Command="Slider.IncreaseLarge">
+                                        <RepeatButton.Template>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Border Background="Transparent" />
+                                            </ControlTemplate>
+                                        </RepeatButton.Template>
+                                    </RepeatButton>
+                                </Track.IncreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Width="11" Height="11">
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Ellipse Fill="{StaticResource TextBrush}" />
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <!-- Con el sector silenciado el slider se apaga: mover un volumen
+                                 que no suena es la clase de control que te hace dudar de si la
+                                 app funciona. -->
+                            <DataTrigger Binding="{Binding IsMuted}" Value="True">
+                                <Setter Property="Opacity" Value="0.35" />
+                            </DataTrigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- ══ Botón de la barra superior ══ -->
         <Style x:Key="ToolbarButton" TargetType="Button">
             <Setter Property="Height" Value="26" />
