@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Input;
 using AmpzMediaBoard.Board;
 using AmpzMediaBoard.Layout;
+using AmpzMediaBoard.Media;
 using AmpzMediaBoard.Persistence;
 
 namespace AmpzMediaBoard;
@@ -212,6 +213,59 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Carga en el sector seleccionado el archivo que haya en el portapapeles.
+    ///
+    /// Acepta las DOS formas en que un path llega al portapapeles, porque el usuario no piensa
+    /// en cuál es: copiar el archivo en el Explorer (Ctrl+C, que deja una LISTA DE ARCHIVOS) o
+    /// copiar la ruta como texto ("Copiar como ruta de acceso" de Windows, o pegada de cualquier
+    /// lado). Soportar solo una de las dos haría que la feature funcione día por medio.
+    /// </summary>
+    private void PasteMediaPath()
+    {
+        if (_board.Selected is not { } sector) return;
+
+        string? path = null;
+        try
+        {
+            if (Clipboard.ContainsFileDropList())
+            {
+                path = Clipboard.GetFileDropList().Cast<string?>().FirstOrDefault(
+                    p => p is not null && MediaKinds.IsSupported(p));
+            }
+            else if (Clipboard.ContainsText())
+            {
+                // "Copiar como ruta de acceso" de Windows envuelve el path en comillas.
+                var texto = Clipboard.GetText().Trim().Trim('"');
+                if (MediaKinds.IsSupported(texto)) path = texto;
+            }
+        }
+        catch
+        {
+            // El portapapeles es un recurso compartido de todo el sistema: otra app puede
+            // tenerlo tomado justo en este instante. Que falle no puede voltear la app.
+            return;
+        }
+
+        if (path is null)
+        {
+            MessageBox.Show(
+                "En el portapapeles no hay ningún archivo de media soportado.\n\n"
+                + "Copiá el archivo desde el Explorer, o copiá su ruta como texto.",
+                "Ampz MediaBoard", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (!File.Exists(path))
+        {
+            MessageBox.Show($"El archivo no existe:\n\n{path}",
+                "Ampz MediaBoard", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        sector.Adopt(path);
+    }
+
     /// <summary>El título dice SIEMPRE sobre qué archivo estás trabajando — o que todavía no hay ninguno.</summary>
     private void UpdateTitle() =>
         Title = _currentFile is null
@@ -265,6 +319,10 @@ public partial class MainWindow : Window
                     return;
                 case Key.N:
                     NewBoard();
+                    e.Handled = true;
+                    return;
+                case Key.V:
+                    PasteMediaPath();
                     e.Handled = true;
                     return;
             }

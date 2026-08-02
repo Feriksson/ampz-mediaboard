@@ -534,6 +534,30 @@ la estructura del split siguen en el JSON.
 | `Ctrl+O` | Abrir un `.mboard` |
 | `Ctrl+S` | Guardar en el archivo actual (si no hay, pregunta dónde) |
 | `Ctrl+Shift+S` | Guardar como… |
+| `Ctrl+V` | Cargar en el sector seleccionado el archivo del portapapeles |
+
+### Las TRES formas de poner un clip en un sector
+
+Las tres terminan en `SectorNode.Adopt`, que centraliza la única regla que hay que respetar
+siempre: si el sector estaba **huérfano** se RE-VINCULA conservando los markers; si tenía otro
+clip se REEMPLAZA y los markers se resetean (son de otro video). Antes esa decisión estaba
+repetida en cada punto de entrada — así es como se termina con un camino que se olvidó de
+conservar los markers.
+
+1. **Arrastrar** un archivo desde el Explorer.
+2. **Botón de la cabecera** (ícono de carpeta) → diálogo de archivo. En su campo "Nombre" se
+   puede **pegar un path completo** y dar Enter, que es lo que sirve para rutas largas o de red.
+3. **`Ctrl+V`** sobre el sector seleccionado.
+
+⚠ El pegado acepta las **dos** formas en que un path llega al portapapeles, porque el usuario no
+piensa en cuál es: copiar el archivo en el Explorer (`Ctrl+C`, deja una **lista de archivos**) o
+copiar la ruta como **texto** ("Copiar como ruta de acceso" de Windows, que además la envuelve en
+comillas — se limpian). Soportar solo una haría que la feature funcione día por medio.
+
+El filtro del diálogo se **deriva** de las listas de extensiones de `MediaKinds`: si mañana se
+agrega un formato, el diálogo lo ofrece solo. Escribirlo a mano sería un segundo lugar donde
+declarar lo mismo, y el día que se desincronicen el usuario ve en el diálogo un archivo que la app
+después rechaza.
 
 **Partir sectores es SOLO por los botones de la cabecera de cada sector.** La barra superior tenía
 botones de partir y se sacaron: actuaban sobre "el sector seleccionado", lo que obligaba a mirar

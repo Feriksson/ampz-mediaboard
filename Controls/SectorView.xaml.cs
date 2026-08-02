@@ -54,7 +54,8 @@ public partial class SectorView : UserControl
         ClearButton.Click += (_, _) => _node?.Unload();
         CloseButton.Click += (_, _) => { if (_node is not null) Board?.Close(_node); };
         PlayButton.Click += (_, _) => _node?.TogglePlay();
-        RelinkButton.Click += (_, _) => BrowseAndRelink();
+        BrowseButton.Click += (_, _) => BrowseForMedia();
+        RelinkButton.Click += (_, _) => BrowseForMedia();
 
         Timeline.SeekRequested += (_, ms) => _node?.SeekTo(ms);
 
@@ -253,24 +254,38 @@ public partial class SectorView : UserControl
     }
 
     /// <summary>Abre el diálogo de archivo para re-vincular un sector huérfano.</summary>
-    private void BrowseAndRelink()
+    /// <summary>
+    /// Abre el diálogo de archivo para poner un clip en el sector.
+    ///
+    /// Es la alternativa al drag &amp; drop, y no es un capricho: arrastrar obliga a tener el
+    /// Explorer abierto y acomodado al lado de la app. Con un path largo, uno de red, o uno que
+    /// copiaste de otro lado, el diálogo gana — y su campo "Nombre" acepta que PEGUES el path
+    /// completo y le des Enter.
+    ///
+    /// Lo usan dos entradas: el botón de la cabecera y el "Buscar el archivo…" del estado de
+    /// archivo ausente.
+    /// </summary>
+    private void BrowseForMedia()
     {
         if (_node is null) return;
 
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
-            Title = "Buscar el archivo del sector",
-            Filter = "Media|*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.wmv;*.flv;*.mpg;*.mpeg;*.ts;*.m2ts;*.gif;"
-                   + "*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.tif;*.tiff|Todos los archivos|*.*",
+            Title = _node.IsMissing ? "Buscar el archivo del sector" : "Elegir el media del sector",
+            Filter = MediaKinds.DialogFilter,
             CheckFileExists = true,
         };
 
-        // Arranca en la carpeta donde VIVÍA el archivo: si el clip se movió dentro del mismo
-        // árbol, ya estás cerca. Si esa carpeta tampoco existe, el diálogo la ignora solo.
-        if (_node.MissingPath is { } previous && Path.GetDirectoryName(previous) is { } folder)
+        // Arranca en la carpeta del clip que el sector tenía (o del que perdió): si el archivo se
+        // movió dentro del mismo árbol, o si el próximo sale de la misma carpeta, ya estás cerca.
+        var reference = _node.MediaPath ?? _node.MissingPath;
+        if (reference is not null && Path.GetDirectoryName(reference) is { Length: > 0 } folder)
             dialog.InitialDirectory = folder;
 
-        if (dialog.ShowDialog() == true) _node.Relink(dialog.FileName);
+        if (dialog.ShowDialog() != true) return;
+
+        _node.Adopt(dialog.FileName);
+        Board?.Select(_node);
     }
 
     /// <summary>
@@ -398,11 +413,8 @@ public partial class SectorView : UserControl
         var path = FirstSupported(e);
         if (path is null || _node is null) return;
 
-        // Soltar sobre un sector huérfano es RE-VINCULAR: se conservan sus markers de loop.
-        // Soltar sobre cualquier otro sector es reemplazar, y ahí los markers sí se resetean
-        // (son de otro clip: mantenerlos sería marcar una zona que no tiene nada que ver).
-        if (_node.IsMissing) _node.Relink(path);
-        else _node.Load(path);
+        // Adopt() decide re-vincular o reemplazar según el estado del sector. Ver SectorNode.
+        _node.Adopt(path);
         Board?.Select(_node);
         e.Handled = true;
     }

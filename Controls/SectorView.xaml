@@ -39,12 +39,13 @@
                          sector. Se eligio la cabecera y no el area de video porque esa area es
                          un HWND hosteado: arrastrar desde ahi es poco confiable. Ademas evita
                          que un click cualquiera sobre el video se interprete como arrastre. -->
-                    <StackPanel Orientation="Horizontal" Margin="0,0,96,0">
+                    <!-- El margen deja lugar a los CINCO botones de la derecha (22px cada uno). -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,120,0">
                         <!-- Asa visible. Sin una pista de que la cabecera se arrastra, la
                              funcionalidad existe pero nadie la encuentra: una feature invisible
                              es una feature que no está. Solo aparece con media cargado, porque
                              un sector vacío no tiene nada que mover. -->
-                        <TextBlock x:Name="DragGrip" Text="&#x2059;" FontSize="13" Margin="0,0,5,0"
+                        <TextBlock x:Name="DragGrip" Text="&#x22EE;&#x22EE;" FontSize="12" Margin="0,0,5,0"
                                    VerticalAlignment="Center" Visibility="Collapsed"
                                    Foreground="{DynamicResource HintBrush}"
                                    ToolTip="Arrastrá de acá para mover el media a otro sector" />
@@ -53,6 +54,19 @@
                                    TextTrimming="CharacterEllipsis" />
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <!-- Elegir el archivo sin arrastrar. Va PRIMERO porque es la acción de
+                             "traer contenido": el resto de los botones operan sobre lo que ya
+                             hay. En el diálogo se puede pegar un path completo y dar Enter. -->
+                        <!-- ⚠ Acá había un glifo de carpeta de "Segoe MDL2 Assets" y salía TOFU
+                             (el rectángulo vacío del glifo faltante) — verificado con captura y
+                             zoom. La fuente carga (el botón de silencio la usa y anda), pero ese
+                             codepoint no está. Los puntos suspensivos son LA convención de
+                             Windows para "buscar un archivo" y existen en cualquier fuente: no
+                             pueden fallar. Con íconos, lo aburrido y garantizado le gana a lo
+                             lindo y frágil. -->
+                        <Button x:Name="BrowseButton" Content="&#x2026;" FontSize="13" FontWeight="Bold"
+                                ToolTip="Elegir el archivo…  (o pegá el path con Ctrl+V sobre el sector)"
+                                Style="{DynamicResource IconButton}" />
                         <Button x:Name="SplitVerticalButton" Content="&#x2502;" ToolTip="Partir en dos columnas"
                                 Style="{DynamicResource IconButton}" />
                         <Button x:Name="SplitHorizontalButton" Content="&#x2500;" ToolTip="Partir en dos filas"

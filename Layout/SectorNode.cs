@@ -265,6 +265,24 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     }
 
     /// <summary>
+    /// Pone un archivo en el sector haciendo lo correcto según su estado.
+    ///
+    /// Es EL punto de entrada para "cargar este path acá", venga de donde venga: soltar un
+    /// archivo, el botón de elegir, o pegar con Ctrl+V. Centraliza la única regla que hay que
+    /// respetar siempre — si el sector estaba huérfano se RE-VINCULA (conservando los markers
+    /// que te costó ajustar), y si tenía otro clip se REEMPLAZA (y ahí los markers sí se
+    /// resetean: son de otro video, mantenerlos marcaría una zona sin sentido).
+    ///
+    /// Antes esta decisión estaba repetida en cada punto de entrada, que es exactamente como se
+    /// termina con un camino que se olvidó de conservar los markers.
+    /// </summary>
+    public void Adopt(string path)
+    {
+        if (IsMissing) Relink(path);
+        else Load(path);
+    }
+
+    /// <summary>
     /// Re-vincula un sector huérfano a un archivo, conservando sus markers de loop. Es la razón
     /// de ser de todo el mecanismo de "missing": moviste la carpeta, apuntás de nuevo al clip y
     /// no perdiste el trabajo de marcar la zona.
