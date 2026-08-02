@@ -68,10 +68,14 @@ public partial class SectorView : UserControl
         // existiera).
         Video.Loaded += (_, _) => StartWhenSurfaceReady();
 
-        // La cabecera es el asa para mover el media a otro sector.
+        // La cabecera ARMA el arrastre, pero el movimiento se escucha en el SECTOR ENTERO.
+        // ⚠ No es un detalle: WPF no captura el mouse al apretar, así que los eventos de
+        // movimiento solo llegan al elemento que está DEBAJO del cursor. La cabecera mide ~24px
+        // de alto; si escucháramos solo ahí, salirse de esos 24px antes de superar el umbral
+        // de arrastre dejaba el drag sin arrancar nunca, sin ningún error visible.
         Header.PreviewMouseLeftButtonDown += OnHeaderMouseDown;
-        Header.PreviewMouseMove += OnHeaderMouseMove;
-        Header.PreviewMouseLeftButtonUp += (_, _) => _dragArmed = false;
+        PreviewMouseMove += OnHeaderMouseMove;
+        PreviewMouseLeftButtonUp += (_, _) => _dragArmed = false;
 
         DragOver += OnDragOver;
         DragLeave += OnDragLeave;
@@ -85,10 +89,15 @@ public partial class SectorView : UserControl
         // Un click sobre los botones de la cabecera (partir, desvincular, cerrar) NO arma un
         // arrastre: si lo hiciera, el más mínimo temblor del mouse convertiría "cerrar sector"
         // en "mover el clip a otro lado".
-        if (e.OriginalSource is DependencyObject source && FindAncestor<ButtonBase>(source) is not null) return;
+        if (e.OriginalSource is DependencyObject source && FindAncestor<ButtonBase>(source) is not null)
+        {
+            DragLog($"click en un boton de la cabecera de '{_node?.Title}': NO se arma arrastre");
+            return;
+        }
 
         _dragOrigin = e.GetPosition(this);
         _dragArmed = true;
+        DragLog($"ARMADO el arrastre en la cabecera de '{_node?.Title}' (tiene media: {_node?.HasMedia}, ausente: {_node?.IsMissing})");
     }
 
     private void OnHeaderMouseMove(object sender, MouseEventArgs e)
@@ -108,7 +117,9 @@ public partial class SectorView : UserControl
 
         try
         {
-            DragDrop.DoDragDrop(this, new DataObject(SectorMediaFormat, string.Empty), DragDropEffects.Move);
+            DragLog($"DoDragDrop ARRANCA desde '{_node.Title}'");
+            var result = DragDrop.DoDragDrop(this, new DataObject(SectorMediaFormat, "sector"), DragDropEffects.Move);
+            DragLog($"DoDragDrop TERMINA con efecto = {result}");
         }
         finally
         {
@@ -117,6 +128,42 @@ public partial class SectorView : UserControl
             // porque un _dragSource colgado haría que el próximo arrastre mueva el clip equivocado.
             _dragSource = null;
         }
+    }
+
+    /// <summary>
+    /// Instrumentación del arrastre entre sectores: poniéndola en <c>true</c> escribe la
+    /// secuencia real de eventos a `ampz-drag.log`, junto al exe.
+    ///
+    /// Queda APAGADA pero presente a propósito. El drag&amp;drop de WPF conviviendo con el HWND
+    /// del VideoView no se diagnostica con teoría — o ves la secuencia (armado → DoDragDrop →
+    /// DragOver aceptado/rechazado → drop), o adivinás. Reescribirla cada vez que haga falta es
+    /// perder media hora; dejarla prendida es ensuciar el disco del usuario para siempre.
+    /// </summary>
+    private static readonly bool DragDiagnostics = false;
+
+    private static string _lastDragState = string.Empty;
+
+    private static void DragLog(string message)
+    {
+        if (!DragDiagnostics) return;
+        try
+        {
+            File.AppendAllText(
+                Path.Combine(AppContext.BaseDirectory, "ampz-drag.log"),
+                $"{DateTime.Now:HH:mm:ss.fff}  {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Un log que falla jamás puede voltear la app.
+        }
+    }
+
+    /// <summary>DragOver dispara decenas de veces por segundo: solo se loguea cuando el estado CAMBIA.</summary>
+    private static void DragLogState(string state)
+    {
+        if (state == _lastDragState) return;
+        _lastDragState = state;
+        DragLog(state);
     }
 
     private static T? FindAncestor<T>(DependencyObject? node) where T : DependencyObject
@@ -187,6 +234,11 @@ public partial class SectorView : UserControl
         // "Vacío" y "falta el archivo" son estados DISTINTOS y se ven distinto: uno te invita a
         // soltar algo, el otro te dice qué se perdió y cómo recuperarlo.
         MissingHint.Visibility = missing is not null ? Visibility.Visible : Visibility.Collapsed;
+
+        // El asa y el cursor de "movible" solo aparecen si hay algo que mover.
+        var movable = kind != MediaKind.None || missing is not null;
+        DragGrip.Visibility = movable ? Visibility.Visible : Visibility.Collapsed;
+        Header.Cursor = movable ? Cursors.SizeAll : Cursors.Arrow;
         EmptyHint.Visibility = kind == MediaKind.None && missing is null
             ? Visibility.Visible
             : Visibility.Collapsed;
@@ -283,6 +335,7 @@ public partial class SectorView : UserControl
         if (e.Data.GetDataPresent(SectorMediaFormat))
         {
             var moving = _dragSource is not null && !ReferenceEquals(_dragSource, _node);
+            DragLogState($"DragOver sobre '{_node?.Title}' (video visible: {Video.Visibility == Visibility.Visible}) -> aceptado: {moving}");
             e.Effects = moving ? DragDropEffects.Move : DragDropEffects.None;
             DropVeil.Visibility = moving ? Visibility.Visible : Visibility.Collapsed;
             DropVeilText.Text = _node is { HasMedia: true } or { IsMissing: true }
@@ -326,8 +379,17 @@ public partial class SectorView : UserControl
         // Movimiento de media entre sectores: intercambia contenidos. Ver BoardViewModel.SwapMedia.
         if (e.Data.GetDataPresent(SectorMediaFormat))
         {
+            DragLog($"DROP sobre '{_node?.Title}' desde '{_dragSource?.Title}'");
+
             if (_dragSource is { } origin && _node is not null && !ReferenceEquals(origin, _node))
+            {
                 Board?.SwapMedia(origin, _node);
+                DragLog("  -> intercambio EJECUTADO");
+            }
+            else
+            {
+                DragLog("  -> ignorado (mismo sector o sin origen)");
+            }
 
             e.Handled = true;
             return;

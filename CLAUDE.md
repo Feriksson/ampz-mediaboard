@@ -129,6 +129,23 @@ código, es la app abierta:
 El `Bash` tool corre por bash → toda invocación de PowerShell va envuelta en
 `powershell.exe -Command "..."`. Nunca metas `$_` en ese string (bash lo expande antes que PowerShell).
 
+### ⚠ SI HAY UN RELEASE PUBLICADO, REPUBLICALO — o el usuario prueba código viejo
+
+El doble click en un `.mboard` abre el exe de **`bin\Release\...\publish\`**, no el de Debug. Si
+después de un cambio solo hacés `dotnet build`, el usuario que abre su board **sigue corriendo el
+binario anterior** y va a reportar que la feature nueva "no funciona". Ya pasó, y costó una sesión
+entera de debug persiguiendo un arrastre que sí existía… en el otro binario.
+
+Regla: cuando exista una carpeta `publish/` y la asociación apunte ahí, **republicá también**:
+```powershell
+dotnet publish AmpzMediaBoard.csproj -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true
+```
+
+Agrava el problema que, con la cadencia de release actual, el trabajo en `develop` **no mueve la
+versión**: los dos binarios muestran el MISMO número. Por eso el build de Debug pinta **`dev`** al
+lado de la versión en la barra (`MainWindow.ShowVersion`, bajo `#if DEBUG`). Si en la barra ves
+`dev`, estás en Debug; si no, en el Release publicado. No saques esa marca.
+
 ---
 
 ## ⚠ Por qué LibVLCSharp y NO FFME (no lo vuelvas atrás sin datos nuevos)

@@ -231,7 +231,18 @@ public partial class MainWindow : Window
     private void ShowVersion()
     {
         var version = Assembly.GetExecutingAssembly().GetName().Version;
-        VersionLabel.Text = version is null ? string.Empty : $"v{version.Major}.{version.Minor}.{version.Build}";
+        var texto = version is null ? string.Empty : $"v{version.Major}.{version.Minor}.{version.Build}";
+
+        // ⚠ El sufijo "dev" NO es decoración: con la cadencia de release actual el trabajo en
+        // develop NO mueve la versión, así que el build de Debug y el Release publicado muestran
+        // el MISMO número. Sin esta marca es imposible saber a ojo cuál de los dos estás usando
+        // — y eso ya costó una sesión entera de debug persiguiendo una feature que sí existía,
+        // pero en el otro binario.
+#if DEBUG
+        texto += "  dev";
+#endif
+
+        VersionLabel.Text = texto;
     }
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
