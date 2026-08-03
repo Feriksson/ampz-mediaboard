@@ -29,13 +29,32 @@ El bump se deriva de los conventional commits que entran a `main` (`BREAKING CHA
 `feat:` → minor, el resto → patch) y **viaja EN la promoción**: commit `chore(release): vX.Y.Z`
 sobre `develop`, ANTES del merge a `main`. Nunca directo sobre `main`.
 
-Flujo de trabajo: se desarrolla en `develop`, se promociona a `main`.
+### ⚠ CADENCIA — un release NO es un commit (decisión del usuario, 2026-07-31)
 
-**Push automático (decisión del usuario, 2026-07-31)**: al cerrar un release NO hay que preguntar
-si subir. Se pushea derecho:
-```powershell
-git push origin main develop --follow-tags
-```
+| Rama | Cuándo | Versión |
+|---|---|---|
+| `develop` | **cada cambio**: se commitea y se pushea | **NO se toca** |
+| `main` | **SOLO cuando el usuario lo pide explícitamente** | ahí se bumpea, agregando todo lo acumulado |
+
+Disparadores para promocionar: *"cerrá release"*, *"sacá versión"*, *"promocioná a main"* o
+equivalente. **Sin pedido explícito NO se toca `main`, NO se bumpea y NO se taggea.**
+
+Esto se escribe porque ya se hizo mal: durante la primera sesión se promocionó a `main` en CADA
+cambio y salieron **cinco releases en una tarde** (v1.0.0 → v1.3.1). El error fue confundir
+"commitear" con "cortar un release": el protocolo dice *cuándo va el bump* (en la promoción),
+nunca dijo que había que promocionar en cada cambio.
+
+Por qué importa, más allá del ruido:
+- **La versión deja de significar algo.** Debe marcar un estado al que querrías volver, no "el
+  rato en que se tocó un archivo".
+- **La regla del bump está DISEÑADA para acumular**: toma todos los commits entre `main` y
+  `develop` y se queda con la señal más alta (un `feat:` entre veinte `fix:` → minor). Cortando
+  de a un commit, esa lógica no sirve para nada porque siempre hay uno solo para mirar.
+
+**Push automático**: no hay que preguntar si subir.
+- En cada cambio → `git push origin develop`
+- Al cerrar un release → `git push origin main develop --follow-tags`
+
 Remoto: `git@github.com:Feriksson/ampz-mediaboard.git`.
 
 ---
@@ -109,6 +128,23 @@ código, es la app abierta:
 
 El `Bash` tool corre por bash → toda invocación de PowerShell va envuelta en
 `powershell.exe -Command "..."`. Nunca metas `$_` en ese string (bash lo expande antes que PowerShell).
+
+### ⚠ SI HAY UN RELEASE PUBLICADO, REPUBLICALO — o el usuario prueba código viejo
+
+El doble click en un `.mboard` abre el exe de **`bin\Release\...\publish\`**, no el de Debug. Si
+después de un cambio solo hacés `dotnet build`, el usuario que abre su board **sigue corriendo el
+binario anterior** y va a reportar que la feature nueva "no funciona". Ya pasó, y costó una sesión
+entera de debug persiguiendo un arrastre que sí existía… en el otro binario.
+
+Regla: cuando exista una carpeta `publish/` y la asociación apunte ahí, **republicá también**:
+```powershell
+dotnet publish AmpzMediaBoard.csproj -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true
+```
+
+Agrava el problema que, con la cadencia de release actual, el trabajo en `develop` **no mueve la
+versión**: los dos binarios muestran el MISMO número. Por eso el build de Debug pinta **`dev`** al
+lado de la versión en la barra (`MainWindow.ShowVersion`, bajo `#if DEBUG`). Si en la barra ves
+`dev`, estás en Debug; si no, en el Release publicado. No saques esa marca.
 
 ---
 
@@ -251,8 +287,8 @@ reproduciendo después de partir un sector.
 
 ### ⚠ Bugs ya cazados — no los revivas
 
-Cuatro trampas que ya costaron una ronda de debug. Las tres primeras se reportaron desde la UI; la
-cuarta se anticipó antes de que se viera.
+Cinco trampas que ya costaron una ronda de debug. La 1, la 2, la 3 y la 5 se reportaron desde la
+UI; la cuarta se anticipó antes de que se viera.
 
 **1. `Play()` sin HWND → VLC abre SU PROPIA VENTANA.**
 Si le pedís Play a libvlc sin haberle asignado una ventana de salida, **no falla**: se abre una
@@ -292,9 +328,75 @@ mitad de las veces porque el input todavía no abrió).
 separador decimal es la coma, y `:start-time=12,4` para VLC es basura — perderías la posición sin
 ningún error visible.
 
-Las cuatro **desaparecen** al migrar a custom rendering (`WriteableBitmap`): sin HWND no hay
-ventana propia de VLC, ni ventana de overlay, ni re-montaje al re-parentar, ni airspace tragándose
-los eventos de drop.
+**5. Las opciones de un `Media` SOBREVIVEN a `Stop()` + `Play()`.**
+Reportado como *"moví el video de celda y al terminar vuelve a arrancar en posiciones extrañas, no
+respeta el marker"*. Y es hijo directo del bug 4: mover un clip entre sectores lo recarga con
+`:start-time=<posición>` para retomarlo donde iba, y **esa opción vive en el objeto `Media`, no en
+la llamada a `Play()`**. Como el reinicio del loop era `Stop(); Play();` sobre el MISMO media, VLC
+se la volvía a aplicar y el clip reiniciaba en la posición vieja en vez del marker A.
+⚠ Se manifestaba **SOLO con el marker A en 0** (la zona por defecto), porque con A > 0 el
+`if (start > 0) SeekTo(start)` lo corregía. Y A en 0 es justo el estado de un clip recién
+arrastrado a otra celda — por eso se sentía errático y difícil de reproducir.
+→ Fix: `SectorNode.RestartFrom(ms)` construye un `Media` NUEVO apuntando al marker. Bonus: el
+punto de arranque lo resuelve VLC al ABRIR el archivo, así que ya no depende de que un seek
+recién relanzado prenda.
+Enfriamiento propio para el relanzamiento (`RelaunchCooldownMs = 500`, contra los 150 del seek):
+mientras VLC reabre el archivo `Time` devuelve 0, y con el margen corto el caso 3 leía ese 0 como
+que el salto falló y relanzaba de nuevo — el clip nunca terminaba de abrir.
+Regresión: `tools/test-restart.ps1`. ⚠ Si alguna vez la tocás, ojo con la trampa que ya se pisó
+UNA VEZ al escribirla: **medir la posición en el instante del reinicio no distingue nada**, porque
+entre el `Stop()` y que VLC reabra el archivo `Time` devuelve 0 con bug y sin bug. La primera
+versión de la sonda pasaba contra el código roto. Hay que dejar correr una ventana fija (~900ms) y
+comparar por CERCANÍA contra {marker, `:start-time`}.
+
+Las cinco **desaparecen** al migrar a custom rendering (`WriteableBitmap`): sin HWND no hay
+ventana propia de VLC, ni ventana de overlay, ni re-montaje al re-parentar (que es lo que obliga a
+usar `:start-time`, o sea que la 5 se va con la 4), ni airspace tragándose los eventos de drop.
+
+### Mover media entre sectores = INTERCAMBIAR (`BoardViewModel.SwapMedia`)
+
+Arrastrando la **cabecera** de un sector se mueve su media a otro. Y es un **swap**, no un
+"mover y vaciar el origen", por una razón concreta: soltar sobre un sector OCUPADO tiene que
+**reacomodar, no destruir**. Con "mover" a secas, el clip del destino se borraría en silencio — y
+el que está reordenando su board no pidió borrar nada. Si el destino está vacío, el swap ES un
+movimiento simple.
+
+Lo que viaja es la **descripción** del media (`SectorNode.MediaSnapshot`: path, posición, markers,
+volumen, mute), NO el `MediaPlayer`. Un reproductor de VLC está atado a la ventana de salida donde
+arrancó: pasarlo de un sector a otro lo dejaría dibujando en el HWND equivocado — el mismo motivo
+por el que existe `Remount`. Se recarga el clip en destino **desde la posición en la que iba**
+(vía `:start-time`), que cuesta un re-decode y es una acción deliberada del usuario.
+
+⚠ Las DOS fotos se toman ANTES de restaurar ninguna. Restaurar sobre un nodo lo modifica; sacar la
+segunda foto después leería el contenido recién puesto y terminarías con el mismo clip duplicado
+en los dos sectores.
+
+**El asa de arrastre es la cabecera**, no el área de video: esa área es un HWND hosteado y
+arrastrar desde ahí es poco confiable. Además hay umbral de arrastre (`SystemParameters.Minimum*
+DragDistance`) y los botones de la cabecera están excluidos — sin eso, el menor temblor del mouse
+convertiría "cerrar sector" en "mover el clip".
+
+⚠ El nodo de origen viaja en un **campo estático** (`SectorView._dragSource`), NO adentro del
+`DataObject`. El DataObject de WPF está pensado para cruzar procesos y envuelve lo que le metas en
+COM; con objetos vivos y no serializables (y `SectorNode` arrastra un MediaPlayer nativo) eso es
+pedir problemas. El arrastre nunca sale de esta ventana, así que un campo estático es más simple y
+no puede fallar. Se limpia en un `finally` porque `DoDragDrop` es bloqueante y un origen colgado
+haría que el próximo arrastre mueva el clip equivocado.
+
+### Audio por sector
+
+Volumen (`0..100`) y silencio son **por sector**, no globales: en un board con varios clips
+corriendo lo normal es querer escuchar UNO y tener el resto de fondo o mudo. Ambos se persisten en
+el `.mboard` y viajan con el clip al intercambiarlo.
+
+**El mute va aparte del volumen, y no es "volumen a 0"**: así silenciar y volver no te hace perder
+el nivel que habías ajustado. Se usa `MediaPlayer.Mute`, que es justo para eso.
+
+⚠ **VLC no acepta el volumen hasta que existe la salida de audio**, y esa salida se crea recién
+cuando el input abrió. Por eso `SectorNode.ApplyAudio` se llama en **TRES** momentos: al cambiar la
+propiedad, en `StartPending` (después del `Play`), y en el tick donde la duración se conoce por
+primera vez — que es la señal de que el media abrió de verdad. Llamarlo una sola vez al cargar deja
+el nivel sin aplicar y el sector suena siempre a 100.
 
 ### Drag & drop y el HWND
 
@@ -453,6 +555,68 @@ la estructura del split siguen en el JSON.
 | `Ctrl+O` | Abrir un `.mboard` |
 | `Ctrl+S` | Guardar en el archivo actual (si no hay, pregunta dónde) |
 | `Ctrl+Shift+S` | Guardar como… |
+| `Ctrl+V` | Cargar en el sector seleccionado el archivo del portapapeles |
+| `F11` | Pantalla completa (toggle) |
+| `Esc` | Salir de pantalla completa |
+
+### Pantalla completa (`MainWindow`, región "Pantalla completa")
+
+Saca bordes, esconde la barra superior y maximiza a la pantalla ENTERA. Se guarda el trío
+`WindowStyle`/`WindowState`/`ResizeMode` y se restaura al salir: un toggle que te deja la ventana
+de otro tamaño deja de ser un toggle.
+
+⚠ **`WindowState = Normal` ANTES de `Maximized` no es redundante.** Si la ventana YA estaba
+maximizada, cambiarle el `WindowStyle` **no la re-maximiza**: Windows le deja el rect que tenía,
+que es el ÁREA DE TRABAJO → la barra de tareas queda ENCIMA del board. Medido: 2062×1214 en vez de
+2048×1280. Es de esos errores que uno le echa al monitor y nunca al código.
+
+⚠ **`F11` y `Esc` se enganchan ANTES del guard de "hay un sector seleccionado"**. La pantalla
+completa no depende de qué celda esté activa, y un board recién abierto puede no tener ninguna:
+colgarla del guard la haría funcionar día por medio. `Esc` solo se marca como `Handled` si estás
+en pantalla completa — si no, le estarías robando el `Esc` a cualquier otra cosa.
+
+Verificado que cambiar `WindowStyle` en caliente **NO recrea el HWND** de la ventana, o sea que el
+`VideoView` sobrevive (era el riesgo real, ver bug 4). `tools/test-fullscreen.ps1` lo MIDE en vez
+de mirarlo: el rect contra los bounds del monitor, y dos capturas de pantalla separadas en el
+tiempo que tienen que DIFERIR — si el video quedara negro o congelado, falla.
+
+### Los markers se mueven de a saltos grandes: NO es un bug, es el riel
+
+El riel de `LoopTimeline` mapea el clip ENTERO sobre el ancho del sector, así que el paso mínimo
+de un arrastre es `duración / ancho`. Un clip de 10 min en un sector de 400px da **1,5 s por
+píxel**. Se reportó como "los markers no tienen sensibilidad"; no hay ninguna cuantización que
+sacar, es la resolución del control.
+
+Por eso existen las dos vías precisas, y ninguna es "arrastrar mejor":
+- **`A` / `B`** fijan el marker EXACTO donde está el playhead — el flujo real de marcar una zona;
+- **Shift + arrastrar** cambia el delta de proporcional a absoluto (`FineMsPerPixel = 10`).
+  El fino se topea contra `normal/4`: en un clip corto sobre un sector ancho el arrastre normal ya
+  puede ser más preciso que 10ms/px, y un "fino" más grueso que el normal se lee como un bug.
+
+Va con tooltip en los thumbs: un modificador que nadie sabe que existe, no existe.
+
+### Las TRES formas de poner un clip en un sector
+
+Las tres terminan en `SectorNode.Adopt`, que centraliza la única regla que hay que respetar
+siempre: si el sector estaba **huérfano** se RE-VINCULA conservando los markers; si tenía otro
+clip se REEMPLAZA y los markers se resetean (son de otro video). Antes esa decisión estaba
+repetida en cada punto de entrada — así es como se termina con un camino que se olvidó de
+conservar los markers.
+
+1. **Arrastrar** un archivo desde el Explorer.
+2. **Botón de la cabecera** (ícono de carpeta) → diálogo de archivo. En su campo "Nombre" se
+   puede **pegar un path completo** y dar Enter, que es lo que sirve para rutas largas o de red.
+3. **`Ctrl+V`** sobre el sector seleccionado.
+
+⚠ El pegado acepta las **dos** formas en que un path llega al portapapeles, porque el usuario no
+piensa en cuál es: copiar el archivo en el Explorer (`Ctrl+C`, deja una **lista de archivos**) o
+copiar la ruta como **texto** ("Copiar como ruta de acceso" de Windows, que además la envuelve en
+comillas — se limpian). Soportar solo una haría que la feature funcione día por medio.
+
+El filtro del diálogo se **deriva** de las listas de extensiones de `MediaKinds`: si mañana se
+agrega un formato, el diálogo lo ofrece solo. Escribirlo a mano sería un segundo lugar donde
+declarar lo mismo, y el día que se desincronicen el usuario ve en el diálogo un archivo que la app
+después rechaza.
 
 **Partir sectores es SOLO por los botones de la cabecera de cada sector.** La barra superior tenía
 botones de partir y se sacaron: actuaban sobre "el sector seleccionado", lo que obligaba a mirar
@@ -477,7 +641,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Scripts de mantenimiento: `make-ico.ps1` (regenerar el ícono desde el PNG) y `test-missing.ps1` (prueba end-to-end del archivo ausente). |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa). `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores y la persistencia del audio, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. |
 | raíz | `App`, `MainWindow`, `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---
@@ -486,6 +650,11 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 
 - **Comentarios en español**, densos y orientados al *por qué*, no al *qué*. Mantené el estilo:
   cuando agregues lógica no trivial, explicá la razón.
+- **Todo test de regresión se verifica AL REVÉS antes de creerle**: revertí el fix, confirmá que
+  el test FALLA, y recién ahí restauralo. Un test que nunca viste fallar no es un test, es
+  decoración. No es teoría: en esta app ya pasó DOS veces que una sonda pasaba contra el código
+  roto (la del reinicio del loop midiendo el `Time` transitorio, ver bug 5). Si vas a escribir un
+  `test-*.ps1` o un `*Probe/`, este paso no se saltea.
 - `Load()`/`Save()` con try/catch silencioso. Un JSON corrupto o un disco lleno **nunca** tumban la app.
 - Toda data de usuario a `AppPaths.DataDir`, jamás junto al exe.
 - La capa de render no se desparrama: el video se toca en `SectorView` y en ningún otro lado.

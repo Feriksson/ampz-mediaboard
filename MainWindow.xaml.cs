@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Input;
 using AmpzMediaBoard.Board;
 using AmpzMediaBoard.Layout;
+using AmpzMediaBoard.Media;
 using AmpzMediaBoard.Persistence;
 
 namespace AmpzMediaBoard;
@@ -212,6 +213,59 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Carga en el sector seleccionado el archivo que haya en el portapapeles.
+    ///
+    /// Acepta las DOS formas en que un path llega al portapapeles, porque el usuario no piensa
+    /// en cuál es: copiar el archivo en el Explorer (Ctrl+C, que deja una LISTA DE ARCHIVOS) o
+    /// copiar la ruta como texto ("Copiar como ruta de acceso" de Windows, o pegada de cualquier
+    /// lado). Soportar solo una de las dos haría que la feature funcione día por medio.
+    /// </summary>
+    private void PasteMediaPath()
+    {
+        if (_board.Selected is not { } sector) return;
+
+        string? path = null;
+        try
+        {
+            if (Clipboard.ContainsFileDropList())
+            {
+                path = Clipboard.GetFileDropList().Cast<string?>().FirstOrDefault(
+                    p => p is not null && MediaKinds.IsSupported(p));
+            }
+            else if (Clipboard.ContainsText())
+            {
+                // "Copiar como ruta de acceso" de Windows envuelve el path en comillas.
+                var texto = Clipboard.GetText().Trim().Trim('"');
+                if (MediaKinds.IsSupported(texto)) path = texto;
+            }
+        }
+        catch
+        {
+            // El portapapeles es un recurso compartido de todo el sistema: otra app puede
+            // tenerlo tomado justo en este instante. Que falle no puede voltear la app.
+            return;
+        }
+
+        if (path is null)
+        {
+            MessageBox.Show(
+                "En el portapapeles no hay ningún archivo de media soportado.\n\n"
+                + "Copiá el archivo desde el Explorer, o copiá su ruta como texto.",
+                "Ampz MediaBoard", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (!File.Exists(path))
+        {
+            MessageBox.Show($"El archivo no existe:\n\n{path}",
+                "Ampz MediaBoard", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        sector.Adopt(path);
+    }
+
     /// <summary>El título dice SIEMPRE sobre qué archivo estás trabajando — o que todavía no hay ninguno.</summary>
     private void UpdateTitle() =>
         Title = _currentFile is null
@@ -231,8 +285,78 @@ public partial class MainWindow : Window
     private void ShowVersion()
     {
         var version = Assembly.GetExecutingAssembly().GetName().Version;
-        VersionLabel.Text = version is null ? string.Empty : $"v{version.Major}.{version.Minor}.{version.Build}";
+        var texto = version is null ? string.Empty : $"v{version.Major}.{version.Minor}.{version.Build}";
+
+        // ⚠ El sufijo "dev" NO es decoración: con la cadencia de release actual el trabajo en
+        // develop NO mueve la versión, así que el build de Debug y el Release publicado muestran
+        // el MISMO número. Sin esta marca es imposible saber a ojo cuál de los dos estás usando
+        // — y eso ya costó una sesión entera de debug persiguiendo una feature que sí existía,
+        // pero en el otro binario.
+#if DEBUG
+        texto += "  dev";
+#endif
+
+        VersionLabel.Text = texto;
     }
+
+    #region Pantalla completa
+
+    /// <summary>
+    /// Cómo estaba la ventana antes de irse a pantalla completa. Se guarda el trío entero porque
+    /// volver "a lo que había" es parte del contrato de F11: si al salir te dejara la ventana
+    /// maximizada cuando la tenías a medio monitor, el atajo dejaría de ser un toggle y pasaría a
+    /// ser un cambio de layout permanente.
+    /// </summary>
+    private WindowStyle _styleAntesDePantallaCompleta;
+    private WindowState _stateAntesDePantallaCompleta;
+    private ResizeMode _resizeAntesDePantallaCompleta;
+
+    private bool _pantallaCompleta;
+
+    private void TogglePantallaCompleta()
+    {
+        if (_pantallaCompleta) SalirDePantallaCompleta();
+        else EntrarEnPantallaCompleta();
+    }
+
+    private void EntrarEnPantallaCompleta()
+    {
+        if (_pantallaCompleta) return;
+
+        _styleAntesDePantallaCompleta = WindowStyle;
+        _stateAntesDePantallaCompleta = WindowState;
+        _resizeAntesDePantallaCompleta = ResizeMode;
+
+        // ⚠ El paso por Normal ANTES de Maximized NO es redundante. Si la ventana YA estaba
+        // maximizada, cambiarle el WindowStyle no la re-maximiza: Windows le deja el rectángulo
+        // que ya tenía, que es el ÁREA DE TRABAJO — o sea, con la barra de tareas encima del
+        // board. Se ve como "casi pantalla completa" y es de esos bugs que uno atribuye al
+        // monitor. Re-maximizar desde Normal recalcula el rect contra la pantalla COMPLETA.
+        WindowState = WindowState.Normal;
+        WindowStyle = WindowStyle.None;
+        ResizeMode = ResizeMode.NoResize;
+        WindowState = WindowState.Maximized;
+
+        TopBar.Visibility = Visibility.Collapsed;
+        _pantallaCompleta = true;
+    }
+
+    private void SalirDePantallaCompleta()
+    {
+        if (!_pantallaCompleta) return;
+
+        // El orden inverso al de entrada, por el mismo motivo: se restaura el estilo con la
+        // ventana en Normal y recién después el estado que tenía.
+        WindowState = WindowState.Normal;
+        WindowStyle = _styleAntesDePantallaCompleta;
+        ResizeMode = _resizeAntesDePantallaCompleta;
+        WindowState = _stateAntesDePantallaCompleta;
+
+        TopBar.Visibility = Visibility.Visible;
+        _pantallaCompleta = false;
+    }
+
+    #endregion
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -256,7 +380,30 @@ public partial class MainWindow : Window
                     NewBoard();
                     e.Handled = true;
                     return;
+                case Key.V:
+                    PasteMediaPath();
+                    e.Handled = true;
+                    return;
             }
+        }
+
+        // ⚠ F11 y Esc van ANTES del guard de "hay un sector seleccionado". La pantalla completa no
+        // tiene NADA que ver con qué sector está seleccionado, y un board recién abierto puede no
+        // tener ninguno: colgarla del guard haría que el atajo funcione día por medio.
+        switch (e.Key)
+        {
+            case Key.F11:
+                TogglePantallaCompleta();
+                e.Handled = true;
+                return;
+
+            // Esc SALE de pantalla completa, pero solo si estás en pantalla completa. Es la
+            // convención universal (y sin bordes ni barra, la salida a mano no es evidente).
+            // Marcarlo como Handled fuera de ese caso sería robarle el Esc a cualquier otra cosa.
+            case Key.Escape when _pantallaCompleta:
+                SalirDePantallaCompleta();
+                e.Handled = true;
+                return;
         }
 
         if (_board.Selected is not { } sector) return;

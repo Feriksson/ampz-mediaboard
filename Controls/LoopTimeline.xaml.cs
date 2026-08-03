@@ -24,6 +24,18 @@ public partial class LoopTimeline : UserControl
     /// </summary>
     private const double MinSpanMs = 120;
 
+    /// <summary>
+    /// Milisegundos por píxel en el modo de AJUSTE FINO (arrastrar con Shift).
+    ///
+    /// ⚠ Esto existe por una limitación REAL del control, no por capricho: el riel mapea el clip
+    /// ENTERO sobre el ancho del sector, así que el paso mínimo de un arrastre normal es
+    /// `duración / ancho`. En un clip de 10 minutos dentro de un sector de 400px eso da 1,5
+    /// SEGUNDOS por píxel — el usuario lo reporta como "los markers no tienen sensibilidad".
+    /// Con Shift el delta deja de ser proporcional a la duración y pasa a ser absoluto: 10ms por
+    /// píxel, así podés apoyar el marker en el frame que querés por más largo que sea el clip.
+    /// </summary>
+    private const double FineMsPerPixel = 10;
+
     /// <summary>Se dispara cuando el usuario pide moverse a una posición (click en el riel).</summary>
     public event EventHandler<double>? SeekRequested;
 
@@ -149,7 +161,22 @@ public partial class LoopTimeline : UserControl
         // El delta viene en píxeles: se convierte a ms y se SUMA al valor actual. Convertir la
         // posición absoluta del mouse sería equivalente pero acumularía el offset del punto
         // donde agarraste el marker, y el marker "saltaría" al empezar a arrastrar.
-        var deltaMs = deltaX / Usable * DurationMs;
+        //
+        // Sumar (y no recalcular desde el pixel) es además lo que hace posible el ajuste fino:
+        // los ms fraccionarios se ACUMULAN en el double en vez de perderse contra la grilla de
+        // píxeles del riel.
+        var msPerPixel = DurationMs / Usable;
+
+        if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0)
+        {
+            // El fino nunca puede ser MÁS GRUESO que el normal: en un clip corto dentro de un
+            // sector ancho, el arrastre normal ya puede ser más preciso que 10ms/px. El /4
+            // garantiza que Shift siempre se sienta como un ajuste fino y no como un cambio de
+            // velocidad al azar.
+            msPerPixel = Math.Min(FineMsPerPixel, msPerPixel / 4);
+        }
+
+        var deltaMs = deltaX * msPerPixel;
 
         if (isStart)
         {

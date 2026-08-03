@@ -120,6 +120,29 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         LayoutChanged?.Invoke();
     }
 
+    /// <summary>
+    /// Mueve el contenido de un sector a otro, INTERCAMBIÁNDOLOS.
+    ///
+    /// Es un swap y no un "mover y vaciar el origen" por una razón concreta: arrastrar sobre un
+    /// sector OCUPADO tiene que reacomodar, no destruir. Con "mover" a secas, soltar sobre una
+    /// celda con un clip te lo borraría en silencio — y el usuario que está reordenando su board
+    /// no está pidiendo borrar nada. Si el destino está vacío, el swap ES un movimiento simple.
+    /// </summary>
+    public void SwapMedia(SectorNode source, SectorNode target)
+    {
+        if (ReferenceEquals(source, target)) return;
+
+        // Las dos fotos se toman ANTES de tocar nada: restaurar sobre uno modifica ese nodo, y
+        // si sacáramos la segunda foto después ya estaría leyendo el contenido recién puesto.
+        var fromSource = source.TakeSnapshot();
+        var fromTarget = target.TakeSnapshot();
+
+        target.Restore(fromSource);
+        source.Restore(fromTarget);
+
+        Select(target);
+    }
+
     /// <summary>Reemplaza el board entero (lo usa la carga desde disco).</summary>
     public void ReplaceRoot(LayoutNode root)
     {

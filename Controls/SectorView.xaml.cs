@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using AmpzMediaBoard.Board;
 using AmpzMediaBoard.Layout;
@@ -20,6 +22,22 @@ namespace AmpzMediaBoard.Controls;
 /// </summary>
 public partial class SectorView : UserControl
 {
+    /// <summary>
+    /// Formato del arrastre ENTRE sectores. Solo marca "esto es un movimiento de media"; el nodo
+    /// de origen viaja por <see cref="_dragSource"/>.
+    ///
+    /// ¿Por qué no meter el nodo adentro del DataObject? Porque el DataObject de WPF está pensado
+    /// para cruzar procesos y envuelve lo que le metas en COM; con objetos vivos y no
+    /// serializables (y SectorNode arrastra un MediaPlayer nativo) eso es pedir problemas. Como
+    /// el arrastre nunca sale de esta ventana, un campo estático es más simple y no puede fallar.
+    /// </summary>
+    private const string SectorMediaFormat = "AmpzMediaBoard.SectorMedia";
+
+    private static SectorNode? _dragSource;
+
+    private Point _dragOrigin;
+    private bool _dragArmed;
+
     private SectorNode? _node;
 
     /// <summary>Lo inyecta <c>BoardView</c> al crear la vista. Es quien sabe partir y cerrar sectores.</summary>
@@ -36,7 +54,8 @@ public partial class SectorView : UserControl
         ClearButton.Click += (_, _) => _node?.Unload();
         CloseButton.Click += (_, _) => { if (_node is not null) Board?.Close(_node); };
         PlayButton.Click += (_, _) => _node?.TogglePlay();
-        RelinkButton.Click += (_, _) => BrowseAndRelink();
+        BrowseButton.Click += (_, _) => BrowseForMedia();
+        RelinkButton.Click += (_, _) => BrowseForMedia();
 
         Timeline.SeekRequested += (_, ms) => _node?.SeekTo(ms);
 
@@ -50,10 +69,115 @@ public partial class SectorView : UserControl
         // existiera).
         Video.Loaded += (_, _) => StartWhenSurfaceReady();
 
+        // La cabecera ARMA el arrastre, pero el movimiento se escucha en el SECTOR ENTERO.
+        // ⚠ No es un detalle: WPF no captura el mouse al apretar, así que los eventos de
+        // movimiento solo llegan al elemento que está DEBAJO del cursor. La cabecera mide ~24px
+        // de alto; si escucháramos solo ahí, salirse de esos 24px antes de superar el umbral
+        // de arrastre dejaba el drag sin arrancar nunca, sin ningún error visible.
+        Header.PreviewMouseLeftButtonDown += OnHeaderMouseDown;
+        PreviewMouseMove += OnHeaderMouseMove;
+        PreviewMouseLeftButtonUp += (_, _) => _dragArmed = false;
+
         DragOver += OnDragOver;
         DragLeave += OnDragLeave;
         Drop += OnDrop;
     }
+
+    #region Arrastre del media entre sectores
+
+    private void OnHeaderMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        // Un click sobre los botones de la cabecera (partir, desvincular, cerrar) NO arma un
+        // arrastre: si lo hiciera, el más mínimo temblor del mouse convertiría "cerrar sector"
+        // en "mover el clip a otro lado".
+        if (e.OriginalSource is DependencyObject source && FindAncestor<ButtonBase>(source) is not null)
+        {
+            DragLog($"click en un boton de la cabecera de '{_node?.Title}': NO se arma arrastre");
+            return;
+        }
+
+        _dragOrigin = e.GetPosition(this);
+        _dragArmed = true;
+        DragLog($"ARMADO el arrastre en la cabecera de '{_node?.Title}' (tiene media: {_node?.HasMedia}, ausente: {_node?.IsMissing})");
+    }
+
+    private void OnHeaderMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_dragArmed || e.LeftButton != MouseButtonState.Pressed) return;
+        if (_node is null || (!_node.HasMedia && !_node.IsMissing)) return;
+
+        // Se espera a superar el umbral del sistema antes de arrancar el arrastre. Sin esto,
+        // cualquier click con un pixel de movimiento se convierte en un drag y la cabecera se
+        // vuelve imposible de clickear.
+        var current = e.GetPosition(this);
+        if (Math.Abs(current.X - _dragOrigin.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(current.Y - _dragOrigin.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+
+        _dragArmed = false;
+        _dragSource = _node;
+
+        try
+        {
+            DragLog($"DoDragDrop ARRANCA desde '{_node.Title}'");
+            var result = DragDrop.DoDragDrop(this, new DataObject(SectorMediaFormat, "sector"), DragDropEffects.Move);
+            DragLog($"DoDragDrop TERMINA con efecto = {result}");
+        }
+        finally
+        {
+            // DoDragDrop es BLOQUEANTE: recién vuelve cuando el usuario soltó o canceló con Esc.
+            // El finally garantiza que el origen se limpie incluso si el drop tiró una excepción,
+            // porque un _dragSource colgado haría que el próximo arrastre mueva el clip equivocado.
+            _dragSource = null;
+        }
+    }
+
+    /// <summary>
+    /// Instrumentación del arrastre entre sectores: poniéndola en <c>true</c> escribe la
+    /// secuencia real de eventos a `ampz-drag.log`, junto al exe.
+    ///
+    /// Queda APAGADA pero presente a propósito. El drag&amp;drop de WPF conviviendo con el HWND
+    /// del VideoView no se diagnostica con teoría — o ves la secuencia (armado → DoDragDrop →
+    /// DragOver aceptado/rechazado → drop), o adivinás. Reescribirla cada vez que haga falta es
+    /// perder media hora; dejarla prendida es ensuciar el disco del usuario para siempre.
+    /// </summary>
+    private static readonly bool DragDiagnostics = false;
+
+    private static string _lastDragState = string.Empty;
+
+    private static void DragLog(string message)
+    {
+        if (!DragDiagnostics) return;
+        try
+        {
+            File.AppendAllText(
+                Path.Combine(AppContext.BaseDirectory, "ampz-drag.log"),
+                $"{DateTime.Now:HH:mm:ss.fff}  {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Un log que falla jamás puede voltear la app.
+        }
+    }
+
+    /// <summary>DragOver dispara decenas de veces por segundo: solo se loguea cuando el estado CAMBIA.</summary>
+    private static void DragLogState(string state)
+    {
+        if (state == _lastDragState) return;
+        _lastDragState = state;
+        DragLog(state);
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? node) where T : DependencyObject
+    {
+        while (node is not null)
+        {
+            if (node is T match) return match;
+            node = VisualTreeHelper.GetParent(node);
+        }
+        return null;
+    }
+
+    #endregion
 
     private void Split(SplitOrientation orientation)
     {
@@ -111,6 +235,11 @@ public partial class SectorView : UserControl
         // "Vacío" y "falta el archivo" son estados DISTINTOS y se ven distinto: uno te invita a
         // soltar algo, el otro te dice qué se perdió y cómo recuperarlo.
         MissingHint.Visibility = missing is not null ? Visibility.Visible : Visibility.Collapsed;
+
+        // El asa y el cursor de "movible" solo aparecen si hay algo que mover.
+        var movable = kind != MediaKind.None || missing is not null;
+        DragGrip.Visibility = movable ? Visibility.Visible : Visibility.Collapsed;
+        Header.Cursor = movable ? Cursors.SizeAll : Cursors.Arrow;
         EmptyHint.Visibility = kind == MediaKind.None && missing is null
             ? Visibility.Visible
             : Visibility.Collapsed;
@@ -125,24 +254,38 @@ public partial class SectorView : UserControl
     }
 
     /// <summary>Abre el diálogo de archivo para re-vincular un sector huérfano.</summary>
-    private void BrowseAndRelink()
+    /// <summary>
+    /// Abre el diálogo de archivo para poner un clip en el sector.
+    ///
+    /// Es la alternativa al drag &amp; drop, y no es un capricho: arrastrar obliga a tener el
+    /// Explorer abierto y acomodado al lado de la app. Con un path largo, uno de red, o uno que
+    /// copiaste de otro lado, el diálogo gana — y su campo "Nombre" acepta que PEGUES el path
+    /// completo y le des Enter.
+    ///
+    /// Lo usan dos entradas: el botón de la cabecera y el "Buscar el archivo…" del estado de
+    /// archivo ausente.
+    /// </summary>
+    private void BrowseForMedia()
     {
         if (_node is null) return;
 
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
-            Title = "Buscar el archivo del sector",
-            Filter = "Media|*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.wmv;*.flv;*.mpg;*.mpeg;*.ts;*.m2ts;*.gif;"
-                   + "*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.tif;*.tiff|Todos los archivos|*.*",
+            Title = _node.IsMissing ? "Buscar el archivo del sector" : "Elegir el media del sector",
+            Filter = MediaKinds.DialogFilter,
             CheckFileExists = true,
         };
 
-        // Arranca en la carpeta donde VIVÍA el archivo: si el clip se movió dentro del mismo
-        // árbol, ya estás cerca. Si esa carpeta tampoco existe, el diálogo la ignora solo.
-        if (_node.MissingPath is { } previous && Path.GetDirectoryName(previous) is { } folder)
+        // Arranca en la carpeta del clip que el sector tenía (o del que perdió): si el archivo se
+        // movió dentro del mismo árbol, o si el próximo sale de la misma carpeta, ya estás cerca.
+        var reference = _node.MediaPath ?? _node.MissingPath;
+        if (reference is not null && Path.GetDirectoryName(reference) is { Length: > 0 } folder)
             dialog.InitialDirectory = folder;
 
-        if (dialog.ShowDialog() == true) _node.Relink(dialog.FileName);
+        if (dialog.ShowDialog() != true) return;
+
+        _node.Adopt(dialog.FileName);
+        Board?.Select(_node);
     }
 
     /// <summary>
@@ -203,10 +346,25 @@ public partial class SectorView : UserControl
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
+        // Dos arrastres distintos caen acá: archivos desde Explorer, y media de OTRO sector.
+        if (e.Data.GetDataPresent(SectorMediaFormat))
+        {
+            var moving = _dragSource is not null && !ReferenceEquals(_dragSource, _node);
+            DragLogState($"DragOver sobre '{_node?.Title}' (video visible: {Video.Visibility == Visibility.Visible}) -> aceptado: {moving}");
+            e.Effects = moving ? DragDropEffects.Move : DragDropEffects.None;
+            DropVeil.Visibility = moving ? Visibility.Visible : Visibility.Collapsed;
+            DropVeilText.Text = _node is { HasMedia: true } or { IsMissing: true }
+                ? "Intercambiar"
+                : "Mover acá";
+            e.Handled = true;
+            return;
+        }
+
         var accepted = FirstSupported(e) is not null;
 
         e.Effects = accepted ? DragDropEffects.Copy : DragDropEffects.None;
         DropVeil.Visibility = accepted ? Visibility.Visible : Visibility.Collapsed;
+        DropVeilText.Text = "Soltá acá";
 
         // Handled=true corta la burbuja hacia arriba: sin esto, el sector padre y la ventana
         // también procesarían el mismo arrastre y el archivo podría caer en el sector equivocado.
@@ -233,14 +391,30 @@ public partial class SectorView : UserControl
     {
         DropVeil.Visibility = Visibility.Collapsed;
 
+        // Movimiento de media entre sectores: intercambia contenidos. Ver BoardViewModel.SwapMedia.
+        if (e.Data.GetDataPresent(SectorMediaFormat))
+        {
+            DragLog($"DROP sobre '{_node?.Title}' desde '{_dragSource?.Title}'");
+
+            if (_dragSource is { } origin && _node is not null && !ReferenceEquals(origin, _node))
+            {
+                Board?.SwapMedia(origin, _node);
+                DragLog("  -> intercambio EJECUTADO");
+            }
+            else
+            {
+                DragLog("  -> ignorado (mismo sector o sin origen)");
+            }
+
+            e.Handled = true;
+            return;
+        }
+
         var path = FirstSupported(e);
         if (path is null || _node is null) return;
 
-        // Soltar sobre un sector huérfano es RE-VINCULAR: se conservan sus markers de loop.
-        // Soltar sobre cualquier otro sector es reemplazar, y ahí los markers sí se resetean
-        // (son de otro clip: mantenerlos sería marcar una zona que no tiene nada que ver).
-        if (_node.IsMissing) _node.Relink(path);
-        else _node.Load(path);
+        // Adopt() decide re-vincular o reemplazar según el estado del sector. Ver SectorNode.
+        _node.Adopt(path);
         Board?.Select(_node);
         e.Handled = true;
     }

@@ -36,4 +36,23 @@ public static class MediaKinds
 
     /// <summary>¿Este archivo lo podemos aceptar en un sector? Lo usa el drag&amp;drop.</summary>
     public static bool IsSupported(string path) => FromPath(path) != MediaKind.None;
+
+    /// <summary>
+    /// Filtro para los diálogos de "elegir archivo". Se DERIVA de las mismas listas de arriba:
+    /// si mañana se agrega un formato, el diálogo lo ofrece solo. Escribirlo a mano sería un
+    /// segundo lugar donde declarar lo mismo, y el día que se desincronicen el usuario ve un
+    /// archivo en el diálogo que la app después rechaza (o al revés, que es peor).
+    /// </summary>
+    public static string DialogFilter { get; } = BuildFilter();
+
+    private static string BuildFilter()
+    {
+        static string Patterns(IEnumerable<string> ext) => string.Join(";", ext.Select(e => "*" + e));
+
+        var todos = Patterns(VideoExt.Concat(ImageExt));
+        return $"Media ({todos})|{todos}"
+             + $"|Video|{Patterns(VideoExt)}"
+             + $"|Imágenes|{Patterns(ImageExt)}"
+             + "|Todos los archivos|*.*";
+    }
 }

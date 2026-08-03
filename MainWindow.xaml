@@ -13,8 +13,11 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- ══ Barra superior ══ -->
-        <Border Grid.Row="0" Background="#1A1A22" Padding="10,7">
+        <!-- ══ Barra superior ══
+             Se ESCONDE en pantalla completa (F11). Ver MainWindow.EnterFullScreen: un board a
+             pantalla completa que igual gasta 34px en botones que no vas a tocar mientras mirás
+             no es pantalla completa, es una ventana sin bordes. -->
+        <Border x:Name="TopBar" Grid.Row="0" Background="#1A1A22" Padding="10,7">
             <Grid>
                 <StackPanel Orientation="Horizontal">
                     <Button x:Name="NewButton" Content="Nuevo" Style="{StaticResource ToolbarButton}"
@@ -35,7 +38,7 @@
                             Style="{StaticResource ToolbarButton}" Visibility="Collapsed"
                             ToolTip="Hace que los archivos .mboard se abran con esta app al doble click" />
                     <TextBlock Foreground="#5A5A6B" FontSize="10" VerticalAlignment="Center"
-                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead" />
+                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead  ·  F11 = pantalla completa" />
                     <Border Width="1" Background="#2E2E3A" Margin="12,1,10,1" />
                     <!-- El texto lo pone ShowVersion() leyendo el assembly. NO se escribe acá:
                          la única fuente de verdad es <Version> en el .csproj. -->
