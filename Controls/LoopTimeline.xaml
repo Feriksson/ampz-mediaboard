@@ -9,6 +9,9 @@
         <Style x:Key="MarkerThumb" TargetType="Thumb">
             <Setter Property="Width" Value="11" />
             <Setter Property="Cursor" Value="SizeWE" />
+            <!-- El ajuste fino con Shift es invisible si no se avisa: un modificador que nadie
+                 sabe que existe, no existe. Ver LoopTimeline.FineMsPerPixel. -->
+            <Setter Property="ToolTip" Value="Arrastrá para mover el marker.&#x0a;Con Shift, ajuste fino (el riel entero mide el clip entero: en un clip largo, un píxel son segundos).&#x0a;Las teclas A y B lo fijan exacto donde está el playhead." />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Thumb">
