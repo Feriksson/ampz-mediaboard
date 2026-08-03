@@ -287,8 +287,8 @@ reproduciendo después de partir un sector.
 
 ### ⚠ Bugs ya cazados — no los revivas
 
-Cuatro trampas que ya costaron una ronda de debug. Las tres primeras se reportaron desde la UI; la
-cuarta se anticipó antes de que se viera.
+Cinco trampas que ya costaron una ronda de debug. La 1, la 2, la 3 y la 5 se reportaron desde la
+UI; la cuarta se anticipó antes de que se viera.
 
 **1. `Play()` sin HWND → VLC abre SU PROPIA VENTANA.**
 Si le pedís Play a libvlc sin haberle asignado una ventana de salida, **no falla**: se abre una
@@ -328,9 +328,30 @@ mitad de las veces porque el input todavía no abrió).
 separador decimal es la coma, y `:start-time=12,4` para VLC es basura — perderías la posición sin
 ningún error visible.
 
-Las cuatro **desaparecen** al migrar a custom rendering (`WriteableBitmap`): sin HWND no hay
-ventana propia de VLC, ni ventana de overlay, ni re-montaje al re-parentar, ni airspace tragándose
-los eventos de drop.
+**5. Las opciones de un `Media` SOBREVIVEN a `Stop()` + `Play()`.**
+Reportado como *"moví el video de celda y al terminar vuelve a arrancar en posiciones extrañas, no
+respeta el marker"*. Y es hijo directo del bug 4: mover un clip entre sectores lo recarga con
+`:start-time=<posición>` para retomarlo donde iba, y **esa opción vive en el objeto `Media`, no en
+la llamada a `Play()`**. Como el reinicio del loop era `Stop(); Play();` sobre el MISMO media, VLC
+se la volvía a aplicar y el clip reiniciaba en la posición vieja en vez del marker A.
+⚠ Se manifestaba **SOLO con el marker A en 0** (la zona por defecto), porque con A > 0 el
+`if (start > 0) SeekTo(start)` lo corregía. Y A en 0 es justo el estado de un clip recién
+arrastrado a otra celda — por eso se sentía errático y difícil de reproducir.
+→ Fix: `SectorNode.RestartFrom(ms)` construye un `Media` NUEVO apuntando al marker. Bonus: el
+punto de arranque lo resuelve VLC al ABRIR el archivo, así que ya no depende de que un seek
+recién relanzado prenda.
+Enfriamiento propio para el relanzamiento (`RelaunchCooldownMs = 500`, contra los 150 del seek):
+mientras VLC reabre el archivo `Time` devuelve 0, y con el margen corto el caso 3 leía ese 0 como
+que el salto falló y relanzaba de nuevo — el clip nunca terminaba de abrir.
+Regresión: `tools/test-restart.ps1`. ⚠ Si alguna vez la tocás, ojo con la trampa que ya se pisó
+UNA VEZ al escribirla: **medir la posición en el instante del reinicio no distingue nada**, porque
+entre el `Stop()` y que VLC reabra el archivo `Time` devuelve 0 con bug y sin bug. La primera
+versión de la sonda pasaba contra el código roto. Hay que dejar correr una ventana fija (~900ms) y
+comparar por CERCANÍA contra {marker, `:start-time`}.
+
+Las cinco **desaparecen** al migrar a custom rendering (`WriteableBitmap`): sin HWND no hay
+ventana propia de VLC, ni ventana de overlay, ni re-montaje al re-parentar (que es lo que obliga a
+usar `:start-time`, o sea que la 5 se va con la 4), ni airspace tragándose los eventos de drop.
 
 ### Mover media entre sectores = INTERCAMBIAR (`BoardViewModel.SwapMedia`)
 
@@ -535,6 +556,44 @@ la estructura del split siguen en el JSON.
 | `Ctrl+S` | Guardar en el archivo actual (si no hay, pregunta dónde) |
 | `Ctrl+Shift+S` | Guardar como… |
 | `Ctrl+V` | Cargar en el sector seleccionado el archivo del portapapeles |
+| `F11` | Pantalla completa (toggle) |
+| `Esc` | Salir de pantalla completa |
+
+### Pantalla completa (`MainWindow`, región "Pantalla completa")
+
+Saca bordes, esconde la barra superior y maximiza a la pantalla ENTERA. Se guarda el trío
+`WindowStyle`/`WindowState`/`ResizeMode` y se restaura al salir: un toggle que te deja la ventana
+de otro tamaño deja de ser un toggle.
+
+⚠ **`WindowState = Normal` ANTES de `Maximized` no es redundante.** Si la ventana YA estaba
+maximizada, cambiarle el `WindowStyle` **no la re-maximiza**: Windows le deja el rect que tenía,
+que es el ÁREA DE TRABAJO → la barra de tareas queda ENCIMA del board. Medido: 2062×1214 en vez de
+2048×1280. Es de esos errores que uno le echa al monitor y nunca al código.
+
+⚠ **`F11` y `Esc` se enganchan ANTES del guard de "hay un sector seleccionado"**. La pantalla
+completa no depende de qué celda esté activa, y un board recién abierto puede no tener ninguna:
+colgarla del guard la haría funcionar día por medio. `Esc` solo se marca como `Handled` si estás
+en pantalla completa — si no, le estarías robando el `Esc` a cualquier otra cosa.
+
+Verificado que cambiar `WindowStyle` en caliente **NO recrea el HWND** de la ventana, o sea que el
+`VideoView` sobrevive (era el riesgo real, ver bug 4). `tools/test-fullscreen.ps1` lo MIDE en vez
+de mirarlo: el rect contra los bounds del monitor, y dos capturas de pantalla separadas en el
+tiempo que tienen que DIFERIR — si el video quedara negro o congelado, falla.
+
+### Los markers se mueven de a saltos grandes: NO es un bug, es el riel
+
+El riel de `LoopTimeline` mapea el clip ENTERO sobre el ancho del sector, así que el paso mínimo
+de un arrastre es `duración / ancho`. Un clip de 10 min en un sector de 400px da **1,5 s por
+píxel**. Se reportó como "los markers no tienen sensibilidad"; no hay ninguna cuantización que
+sacar, es la resolución del control.
+
+Por eso existen las dos vías precisas, y ninguna es "arrastrar mejor":
+- **`A` / `B`** fijan el marker EXACTO donde está el playhead — el flujo real de marcar una zona;
+- **Shift + arrastrar** cambia el delta de proporcional a absoluto (`FineMsPerPixel = 10`).
+  El fino se topea contra `normal/4`: en un clip corto sobre un sector ancho el arrastre normal ya
+  puede ser más preciso que 10ms/px, y un "fino" más grueso que el normal se lee como un bug.
+
+Va con tooltip en los thumbs: un modificador que nadie sabe que existe, no existe.
 
 ### Las TRES formas de poner un clip en un sector
 
@@ -582,7 +641,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia). `LoopProbe/` y `BoardProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores y la persistencia del audio. Salen con código 0/1. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa). `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores y la persistencia del audio, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. |
 | raíz | `App`, `MainWindow`, `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---
@@ -591,6 +650,11 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 
 - **Comentarios en español**, densos y orientados al *por qué*, no al *qué*. Mantené el estilo:
   cuando agregues lógica no trivial, explicá la razón.
+- **Todo test de regresión se verifica AL REVÉS antes de creerle**: revertí el fix, confirmá que
+  el test FALLA, y recién ahí restauralo. Un test que nunca viste fallar no es un test, es
+  decoración. No es teoría: en esta app ya pasó DOS veces que una sonda pasaba contra el código
+  roto (la del reinicio del loop midiendo el `Time` transitorio, ver bug 5). Si vas a escribir un
+  `test-*.ps1` o un `*Probe/`, este paso no se saltea.
 - `Load()`/`Save()` con try/catch silencioso. Un JSON corrupto o un disco lleno **nunca** tumban la app.
 - Toda data de usuario a `AppPaths.DataDir`, jamás junto al exe.
 - La capa de render no se desparrama: el video se toca en `SectorView` y en ningún otro lado.
