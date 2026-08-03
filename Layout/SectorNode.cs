@@ -28,7 +28,18 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// </summary>
     private const long ReseekCooldownMs = 150;
 
+    /// <summary>
+    /// Enfriamiento tras RELANZAR el clip (final de loop). Es más largo que el del seek porque
+    /// acá VLC tiene que volver a ABRIR el archivo: durante ese rato `Time` devuelve 0 y, sin un
+    /// margen más generoso, el caso "estoy antes del marker A" leería ese 0 como que el salto no
+    /// funcionó y relanzaría de nuevo — el clip nunca terminaría de abrir.
+    /// </summary>
+    private const long RelaunchCooldownMs = 500;
+
     private long _lastSeekTick;
+
+    /// <summary>Cuánto dura el enfriamiento en curso. Lo fija quien haya movido el playhead.</summary>
+    private long _seekCooldownMs = ReseekCooldownMs;
 
     /// <summary>
     /// El media abierto pero TODAVÍA NO reproducido. Ver <see cref="StartPending"/>: la
@@ -387,12 +398,11 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         else
         {
             // Si el clip terminó, VLC queda en estado Ended y Play() no reanuda: hay que
-            // reposicionarlo primero. Arrancamos desde el inicio de la zona de loop.
+            // relanzarlo. Va por RestartFrom y no por Stop+Play a secas por el mismo motivo que
+            // el loop: un Play() sin media nuevo re-aplica el `:start-time` viejo.
             if (Player.State is VLCState.Ended or VLCState.Stopped)
             {
-                Player.Stop();
-                Player.Play();
-                SeekTo(LoopEnabled ? LoopStartMs : 0);
+                RestartFrom(LoopEnabled ? LoopStartMs : 0);
             }
             else
             {
@@ -402,6 +412,46 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         }
     }
 
+    /// <summary>
+    /// Relanza el clip desde <paramref name="ms"/> construyendo un Media NUEVO.
+    ///
+    /// ⚠ Esto NO es lo mismo que `Player.Stop(); Player.Play();`, y confundirlos fue un bug
+    /// reportado ("después de mover el clip de celda, al terminar vuelve a arrancar en cualquier
+    /// lado y no respeta el marker"). Motivo: la opción `:start-time` que usan Restore/Remount
+    /// para retomar el clip donde iba vive en el OBJETO MEDIA, no en la llamada a Play(). Un
+    /// Play() sin argumentos relanza ESE MISMO media → VLC vuelve a aplicar el `:start-time` y
+    /// el clip reinicia en la posición vieja en vez de en el marker A. Con A en 0 no había ni
+    /// seek correctivo que lo salvara, así que el clip quedaba loopeando desde un punto
+    /// arbitrario para siempre.
+    ///
+    /// Con un Media nuevo el punto de arranque lo decidimos NOSOTROS en cada vuelta, y además
+    /// lo resuelve VLC al abrir el archivo — no depende de que un seek post-Play prenda (que es
+    /// justo lo que no se puede garantizar recién relanzado).
+    /// </summary>
+    private void RestartFrom(double ms)
+    {
+        if (Player is null || MediaPath is not { } path) return;
+
+        var media = new LibVLCSharp.Shared.Media(VlcEngine.Instance, new Uri(path));
+        if (ms > 0)
+        {
+            // InvariantCulture obligatorio: ver Load(). ":start-time=12,4" para VLC es basura.
+            var seconds = (ms / 1000.0).ToString("0.###", CultureInfo.InvariantCulture);
+            media.AddOption($":start-time={seconds}");
+        }
+
+        // Stop() antes de Play() es obligatorio: desde el estado Ended, Play() solo no rearranca.
+        Player.Stop();
+        Player.Play(media);
+        media.Dispose(); // libvlc se queda con su propia referencia.
+
+        PositionMs = ms;
+        _lastSeekTick = Environment.TickCount64;
+        _seekCooldownMs = RelaunchCooldownMs;
+        IsPlaying = true;
+        ApplyAudio();
+    }
+
     public void SeekTo(double ms)
     {
         if (Player is null) return;
@@ -409,6 +459,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         Player.Time = (long)clamped;
         PositionMs = clamped;
         _lastSeekTick = Environment.TickCount64;
+        _seekCooldownMs = ReseekCooldownMs;
     }
 
     /// <summary>
@@ -463,7 +514,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         var start = Math.Clamp(LoopStartMs, 0, DurationMs);
         var end = LoopEndMs > start ? Math.Min(LoopEndMs, DurationMs) : DurationMs;
 
-        if (Environment.TickCount64 - _lastSeekTick < ReseekCooldownMs) return;
+        if (Environment.TickCount64 - _lastSeekTick < _seekCooldownMs) return;
 
         // TRES casos disparan la vuelta al marker A:
         //  1) el clip TERMINÓ — el caso de la zona por defecto, donde el playhead nunca llega a
@@ -478,18 +529,9 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         if (ended)
         {
             // Con el clip terminado, VLC NO acepta un seek: el input está cerrado. Hay que
-            // relanzarlo. Stop() antes de Play() es obligatorio — desde el estado Ended, Play()
-            // solo no rearranca.
-            Player.Stop();
-            Player.Play();
-            _lastSeekTick = Environment.TickCount64;
-            IsPlaying = true;
-
-            // Play() ya arranca desde cero, así que con el marker A en 0 (el caso por defecto)
-            // no hace falta seek y el loop queda limpio. Si A está más adelante, el seek recién
-            // relanzado puede ignorarse porque el input todavía no abrió — no importa: el caso 3
-            // (beforeStart) lo vuelve a intentar en el tick siguiente hasta que prende.
-            if (start > 0) SeekTo(start);
+            // relanzarlo, y SIEMPRE con un media nuevo apuntando al marker A — ver RestartFrom
+            // para por qué reusar el media viejo reiniciaba el clip en una posición arbitraria.
+            RestartFrom(start);
             return;
         }
 
