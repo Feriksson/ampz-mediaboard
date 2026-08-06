@@ -42,6 +42,11 @@ public partial class App : Application
         if (!BoardFile.IsRegistered()) BoardFile.Register();
 
         new MainWindow(startupFile).Show();
+
+        // DESPUÉS del Show, a propósito: el precalentamiento de VLC es trabajo de fondo y no
+        // tiene que demorar la primera pintada de la ventana. Ver VlcEngine.Warmup para el
+        // porqué (el primer archivo arrastrado se comía el escaneo de plugins en el hilo de UI).
+        VlcEngine.Warmup();
     }
 
     protected override void OnExit(ExitEventArgs e)
