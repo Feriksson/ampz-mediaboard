@@ -1,7 +1,7 @@
 <Window x:Class="AmpzMediaBoard.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Ampz MediaBoard" Height="760" Width="1280"
+        Title="Board sin guardar — AMB" Height="760" Width="1280"
         Icon="ampz-mediaboard.ico"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource WindowBrush}"

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    MEDICION del arranque en frio de VLC.
+
+    Existe para contestar con numeros "por que el PRIMER archivo que arrastras tarda y los
+    siguientes no". Separa el costo en sus tres etapas (cargar libvlc.dll, escanear los ~323
+    plugins, abrir el primer archivo) para saber cual es la que hay que precalentar.
+
+    No es un test de regresion: no falla, INFORMA. Sale 0 siempre salvo error real.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>WarmupProbe</AssemblyName>
+  </PropertyGroup>
+
+  <!-- Los ImplicitUsings de WPF NO traen System.IO. Sin esto, File/Path no resuelven. -->
+  <ItemGroup>
+    <Using Include="System.IO" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\AmpzMediaBoard.csproj" />
+  </ItemGroup>
+
+</Project>

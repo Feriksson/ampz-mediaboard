@@ -266,11 +266,21 @@ public partial class MainWindow : Window
         sector.Adopt(path);
     }
 
-    /// <summary>El título dice SIEMPRE sobre qué archivo estás trabajando — o que todavía no hay ninguno.</summary>
+    /// <summary>
+    /// El título dice SIEMPRE sobre qué archivo estás trabajando — o que todavía no hay ninguno.
+    ///
+    /// ⚠ El nombre del board va PRIMERO y la app se abrevia a "AMB". No es capricho estético:
+    /// el botón de la barra de tareas de Windows trunca por la DERECHA y da lugar a unos pocos
+    /// caracteres. Con "Ampz MediaBoard — " adelante (18 caracteres antes de empezar a decir
+    /// algo), el nombre del board se cortaba SIEMPRE y todas las ventanas se veían idénticas
+    /// — que es justo cuando más lo necesitás, con varios boards abiertos a la vez (la app es
+    /// multi-instancia a propósito). Lo que identifica va primero; la marca, al final, donde
+    /// puede perderse sin costo.
+    /// </summary>
     private void UpdateTitle() =>
         Title = _currentFile is null
-            ? "Ampz MediaBoard — board sin guardar"
-            : $"Ampz MediaBoard — {Path.GetFileNameWithoutExtension(_currentFile)}";
+            ? "Board sin guardar — AMB"
+            : $"{Path.GetFileNameWithoutExtension(_currentFile)} — AMB";
 
     #endregion
 
