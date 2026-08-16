@@ -52,6 +52,7 @@ public partial class SectorView : UserControl
         SplitVerticalButton.Click += (_, _) => Split(SplitOrientation.Horizontal);
         SplitHorizontalButton.Click += (_, _) => Split(SplitOrientation.Vertical);
         ClearButton.Click += (_, _) => _node?.Unload();
+        CopyPathButton.Click += (_, _) => CopyPathToClipboard();
         CloseButton.Click += (_, _) => { if (_node is not null) Board?.Close(_node); };
         PlayButton.Click += (_, _) => _node?.TogglePlay();
         BrowseButton.Click += (_, _) => BrowseForMedia();
@@ -239,6 +240,13 @@ public partial class SectorView : UserControl
         // El asa y el cursor de "movible" solo aparecen si hay algo que mover.
         var movable = kind != MediaKind.None || missing is not null;
         DragGrip.Visibility = movable ? Visibility.Visible : Visibility.Collapsed;
+
+        // Copiar el path solo tiene sentido si hay un path. Se COLAPSA en vez de deshabilitarse
+        // para que los botones no bailen de posición: el StackPanel se corre igual, pero un botón
+        // gris que no hace nada invita a clickearlo y no explica por qué no pasa nada.
+        // ⚠ Se muestra TAMBIEN con el archivo ausente, y es el caso donde MAS sirve: es la ruta
+        // que perdiste, y con ella en el portapapeles la pegás en el Explorer para ir a buscarla.
+        CopyPathButton.Visibility = movable ? Visibility.Visible : Visibility.Collapsed;
         Header.Cursor = movable ? Cursors.SizeAll : Cursors.Arrow;
         EmptyHint.Visibility = kind == MediaKind.None && missing is null
             ? Visibility.Visible
@@ -251,6 +259,64 @@ public partial class SectorView : UserControl
         }
 
         StartWhenSurfaceReady();
+    }
+
+    /// <summary>
+    /// Copia al portapapeles el path COMPLETO del archivo del sector.
+    ///
+    /// Es el camino de vuelta del Ctrl+V que ya existe (ver <c>MainWindow.PasteMediaPath</c>):
+    /// si la app acepta que le peguen una ruta, tiene que saber devolverla — el sector es el
+    /// único lugar donde esa ruta está escrita, y sacarla a ojo desde el título (que va trimado
+    /// con puntos suspensivos) es imposible.
+    ///
+    /// ⚠ Va con <c>SetDataObject(..., copy: true)</c> y no con <c>SetText</c>. Sin ese "copy",
+    /// lo copiado vive en la memoria de ESTE proceso y el portapapeles se VACÍA al cerrar la app:
+    /// copiar el path, cerrar el board y pegarlo en el Explorer —que es el flujo obvio— no
+    /// pegaría nada. El true le pide a Windows que se quede con el contenido.
+    ///
+    /// ⚠ El portapapeles de Windows es un recurso EXCLUSIVO y de un solo dueño: cualquier otra
+    /// app que lo tenga abierto en ese instante hace fallar la llamada con
+    /// <c>CLIPBRD_E_CANT_OPEN</c>. Es transitorio y no es culpa nuestra, pero una excepción sin
+    /// atrapar acá voltea la app entera por un botón accesorio. Se traga en silencio, igual que
+    /// el resto de la app (ver la convención de Load/Save).
+    /// </summary>
+    private void CopyPathToClipboard()
+    {
+        // El path del media, o el del archivo que se perdió: en el estado "ausente" el sector
+        // conserva la ruta a propósito, y ahí copiarla es justo lo que te deja ir a buscarlo.
+        if ((_node?.MediaPath ?? _node?.MissingPath) is not { Length: > 0 } path) return;
+
+        try
+        {
+            Clipboard.SetDataObject(path, true);
+            FlashCopyFeedback();
+        }
+        catch
+        {
+            // Portapapeles ocupado por otra app. No hay nada que hacer y no se pierde nada:
+            // el usuario vuelve a apretar. Sin el visto, el botón ya está diciendo que falló.
+        }
+    }
+
+    /// <summary>
+    /// Confirma la copia cambiando el glifo por un visto durante un segundo.
+    ///
+    /// No es adorno: copiar al portapapeles es la acción SIN retorno visible por excelencia —
+    /// la app se ve exactamente igual antes y después. Sin confirmación el usuario no sabe si
+    /// el click prendió, y la duda se resuelve apretando de nuevo.
+    /// </summary>
+    private void FlashCopyFeedback()
+    {
+        CopyPathButton.Content = "✓";
+
+        // El timer se apaga a sí mismo en el primer tick: es un disparo único, no un latido.
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        timer.Tick += (s, _) =>
+        {
+            ((DispatcherTimer)s!).Stop();
+            CopyPathButton.Content = "⧉";
+        };
+        timer.Start();
     }
 
     /// <summary>Abre el diálogo de archivo para re-vincular un sector huérfano.</summary>
