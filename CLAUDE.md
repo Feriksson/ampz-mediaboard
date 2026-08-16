@@ -203,6 +203,50 @@ LayoutNode
 celda**. Ocho timers compitiendo por la misma cola del Dispatcher se pisan, y el jitter arruina
 justo lo que queremos preciso: el punto de corte del loop.
 
+### ⚠ VLC se precalienta al arrancar (`VlcEngine.Warmup`) — no lo saques
+
+`VlcEngine.Instance` es perezoso, así que **el primer archivo que arrastrás es el que paga el
+arranque del motor**, y lo pagaba en el hilo de UI, adentro del handler del drop: la ventana
+quedaba dura. Se reportó como *"el primer archivo tarda un montón y los siguientes no"*.
+
+El costo no es cargar una DLL: `new LibVLC()` abre y consulta los **~323 DLL de plugins, uno por
+uno**. El paquete NuGet no trae `plugins.dat` (el caché de plugins de VLC) ni el `vlc-cache-gen`
+que lo genera, así que ese escaneo se hace **entero, en cada `new LibVLC()`**.
+
+Medido con `tools/WarmupProbe`:
+
+| Etapa | Costo |
+|---|---|
+| `Core.Initialize()` | ~30–120 ms |
+| `new LibVLC()` | **~250 ms caliente … 17.700 ms EN FRÍO** |
+| primer archivo | ~300–1.400 ms (demuxer + codec bajo demanda) |
+| archivos siguientes | ~50–160 ms |
+
+Ese `17.700` no es un typo: es el primer arranque después de bootear, con Defender mirando los 323
+DLL. **Dos órdenes de magnitud de varianza** — por eso se sentía aleatorio y no correlacionaba con
+el archivo, sino con qué tan caliente estaba el caché del filesystem.
+
+`App.OnStartup` dispara `Warmup()` **después** del `Show()`, en un hilo dedicado `BelowNormal`. No
+acelera nada: corre el mismo trabajo mientras el usuario todavía va al Explorer a buscar el clip.
+Dos detalles que no son cosméticos:
+- **Hilo propio, no del ThreadPool**: en frío bloquea ~17 s y ocuparle un hilo al pool arruina el
+  arranque de todo lo demás.
+- **`_shuttingDown` dentro del lock de `Shutdown()`**: sin eso, cerrar la app en el primer segundo
+  deja al hilo de warmup creando un `LibVLC` que ya nadie va a liberar.
+
+Regresión: `tools/test-warmup.ps1`. **NO mide tiempo** a propósito — entre 250 ms y 17 s no hay
+umbral que distinga nada. Mide el HECHO: `libvlc.dll` cargado en el proceso sin haber arrastrado
+nada. Visto fallar comentando `Warmup()`.
+
+⚠ Se midió y se **descartó** precargar los DLL de plugins a mano (`NativeLibrary.TryLoad` sobre
+`libavcodec_plugin.dll` y compañía). Aporta ~150 ms y obliga a hardcodear rutas de plugins, que
+se rompen **en silencio** el día que se poda la carpeta para achicar el publish — algo que este
+mismo documento contempla. No lo agregues.
+
+⚠ Sigue siendo posible esperar: si soltás un archivo ANTES de que termine el precalentamiento, el
+drop se bloquea en el `lock`. Nunca queda peor que sin warmup (el trabajo es el mismo y ya
+empezó), pero matarlo del todo exige volver asincrónico el camino del drop. No está hecho.
+
 ### Cómo funciona la zona de loop (`SectorNode.EnforceLoop`)
 
 Al conocerse la duración por primera vez, la zona arranca cubriendo el **clip entero**: un clip
@@ -518,8 +562,24 @@ compacto se leería como "modificado" sin que nadie lo tocó.
 MediaPlayer nativo, un BitmapImage y un puntero al padre (un ciclo) — nada de eso puede ni debe
 serializarse.
 
-- El board se **autoguarda al cerrar la ventana**. El botón "Guardar board" (y Ctrl+S) queda para
-  asegurar sin cerrar.
+### ⚠ NO hay autoguardado. En ningún momento. Tampoco al cerrar.
+
+Un board se escribe **solo cuando el usuario lo pide**: "Guardar board", `Ctrl+S`, `Ctrl+Shift+S`,
+o el "Guardar" del diálogo de cambios sin guardar. `MainWindow.OnClosing` lo dice textual:
+*"No se escribe NINGÚN estado al cerrar"*. Lo único que hace al cerrar es **preguntar**
+(`ConfirmDiscardChanges`) y liberar el board.
+
+Esto estuvo **documentado al revés acá mismo** hasta v1.4.1: tres pasajes afirmaban que el board
+"se autoguarda al cerrar la ventana". Nunca fue cierto en el código. Y no era un detalle de
+redacción — **envenenó una prueba**: `tools/test-missing.ps1` abría un board, lo cerraba y
+comparaba el archivo contra sí mismo esperando que el cierre lo hubiera reescrito. Como nadie lo
+reescribe nunca, la comparación daba igual SIEMPRE, incluso con la conservación de la referencia
+rota a propósito. Un verde que no puede ponerse rojo.
+
+Regla que se desprende: **una prueba que "cierra y compara el `.mboard`" no prueba nada.** Si
+querés verificar qué se ESCRIBE, tenés que guardar explícitamente — y si es desde un `.ps1`,
+ojo que `SendKeys`/`AppActivate` no llegan a la ventana de forma confiable. El camino bueno es
+una sonda que llame a `BoardStore` directo (ver `tools/BoardProbe`).
 ### ⚠ Archivo ausente: la referencia NO se descarta (esto evita pérdida de datos)
 
 Si el archivo de un sector no existe al abrir (movido, borrado, disco externo desconectado), el
@@ -527,21 +587,58 @@ sector **conserva el path y los markers** y se marca como ausente (`SectorNode.M
 `IsMissing`). Se muestra un estado ámbar con el nombre, la carpeta donde vivía, y un botón
 "Buscar el archivo…".
 
-**Por qué importa y no es cosmético**: el board se **autoguarda al cerrar**. Si el sector quedara
-vacío, bastaría abrir la app UNA vez con el archivo ausente para borrar para siempre la referencia
-Y la zona de loop que te costó ajustar. El board se degradaría solo, en silencio. Con esto, la
-referencia sobrevive ciclos indefinidos de abrir/cerrar.
+**Por qué importa y no es cosmético**: si el sector quedara vacío al no encontrar el archivo, la
+referencia y la zona de loop que te costó ajustar se perderían **en el primer guardado**. Y ese
+guardado es el que MENOS sospechás: al cerrar, `ConfirmDiscardChanges` compara el board en memoria
+contra el archivo; un board degradado por la carga NO coincide, así que la app pregunta
+*"¿guardar?"* — y la respuesta natural es que sí. Le decís que sí, y confirmás la pérdida con tu
+propia mano. Con la referencia conservada, la comparación da igual, no hay pregunta, y el board
+sobrevive ciclos indefinidos de abrir/cerrar.
 
 Re-vincular (`SectorNode.Relink`) **conserva los markers**; soltar un archivo sobre un sector que
 NO está ausente es reemplazar y sí los resetea (son de otro clip: mantenerlos marcaría una zona
 que no tiene nada que ver).
 
-Verificado end-to-end con `tools/test-missing.ps1`: board con un path fantasma + markers
-1500/4200 → abrir → cerrar limpio (WM_CLOSE, que dispara el autoguardado) → path, ambos markers y
-la estructura del split siguen en el JSON.
+Verificado en DOS niveles, y hacen falta los dos:
+
+- **El round-trip** (lo que de verdad evita la pérdida): `tools/BoardProbe`, caso 3. Guarda un
+  board con sectores ausentes y lo relee. **Visto fallar**: rompiendo el `sector.MarkMissing(path)`
+  de `BoardStore.FromDto`, cae en "los markers siguen ahi".
+- **End-to-end**: `tools/test-missing.ps1`. Board con un path fantasma + markers 1500/4200 → abrir
+  → la app no se cae, el board CARGA (no lo rechaza como corrupto) y cerrar no degrada el archivo.
+
+⚠ Ese `.ps1` estuvo **muerto** hasta v1.4.1 y nadie lo notó: apuntaba a
+`%APPDATA%\AmpzMediaBoard\board.json`, el estado de sesión eliminado en v1.3.0. Como la app dejó
+de escribir ahí, fallaba en TODAS las versiones — y una prueba que no puede pasar nunca no avisa
+nada, se aprende a ignorarla.
+
+⚠ Al reescribirlo apareció otra trampa: **el `.mboard` de prueba se genera con `ConvertTo-Json`,
+nunca a mano.** Un path de Windows tipeado dentro de un JSON (`"D:\clips\x.mp4"`) lleva los
+backslashes SIN ESCAPAR → es JSON inválido → la app lo rechaza con "board corrupto" y la prueba
+termina midiendo el rechazo en vez del board. El síntoma delator es el título de la ventana:
+si dice `Ampz MediaBoard` a secas, eso es el caption de un MessageBox, no la ventana.
 - **`Load()`/`Save()` JAMÁS voltean la app**: try/catch → degradar a board vacío o a memoria.
 
 ---
+
+### ⚠ El título va "board primero, marca al final" (`MainWindow.UpdateTitle`)
+
+`The board — AMB`, no `Ampz MediaBoard — The board`. **No es preferencia estética.**
+
+El botón de la barra de tareas de Windows trunca por la **derecha** y da lugar a un puñado de
+caracteres. Con `Ampz MediaBoard — ` adelante había **18 caracteres antes de que el título dijera
+algo**: el nombre del board se cortaba SIEMPRE y todas las ventanas se veían idénticas. Justo
+cuando más importa distinguirlas — con varios boards abiertos a la vez, que es un caso de uso
+buscado (ver "MULTI-INSTANCIA ES INTENCIONAL").
+
+Lo que IDENTIFICA va primero; la marca va al final, donde puede perderse sin costo. El `Title` del
+XAML se mantiene alineado (`Board sin guardar — AMB`): es lo que se ve en el diseñador y en el
+instante previo a que corra `UpdateTitle`.
+
+⚠ `Ampz MediaBoard` a secas ya NO es un título de ventana válido — es el **caption de todos los
+`MessageBox`** de la app. Si una prueba lee `MainWindowTitle` y ve exactamente eso, lo que hay
+arriba es un diálogo modal, no la ventana. Es el síntoma más rápido para detectar que la app te
+está mostrando un error que no leíste.
 
 ## Atajos
 
@@ -641,7 +738,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa). `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores y la persistencia del audio, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC). `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
 | raíz | `App`, `MainWindow`, `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---

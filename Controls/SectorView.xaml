@@ -39,8 +39,8 @@
                          sector. Se eligio la cabecera y no el area de video porque esa area es
                          un HWND hosteado: arrastrar desde ahi es poco confiable. Ademas evita
                          que un click cualquiera sobre el video se interprete como arrastre. -->
-                    <!-- El margen deja lugar a los CINCO botones de la derecha (22px cada uno). -->
-                    <StackPanel Orientation="Horizontal" Margin="0,0,120,0">
+                    <!-- El margen deja lugar a los SEIS botones de la derecha (22px cada uno). -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,142,0">
                         <!-- Asa visible. Sin una pista de que la cabecera se arrastra, la
                              funcionalidad existe pero nadie la encuentra: una feature invisible
                              es una feature que no está. Solo aparece con media cargado, porque
@@ -70,6 +70,15 @@
                         <Button x:Name="SplitVerticalButton" Content="&#x2502;" ToolTip="Partir en dos columnas"
                                 Style="{DynamicResource IconButton}" />
                         <Button x:Name="SplitHorizontalButton" Content="&#x2500;" ToolTip="Partir en dos filas"
+                                Style="{DynamicResource IconButton}" />
+                        <!-- Copiar el path del archivo al portapapeles. Es el camino de VUELTA del
+                             Ctrl+V que ya existe: el sector sabe qué archivo tiene y de dónde salió;
+                             sacar esa ruta a mano obliga a ir al Explorer a buscarla de nuevo.
+                             ⚠ El glifo ⧉ (U+29C9) se VERIFICO contra "Segoe UI Symbol" con
+                             GlyphTypeface antes de ponerlo — en "Segoe UI" NO existe y saldria
+                             TOFU, que es exactamente el error que ya se pago con el de carpeta. -->
+                        <Button x:Name="CopyPathButton" Content="&#x29C9;" FontFamily="Segoe UI Symbol"
+                                ToolTip="Copiar el path del archivo al portapapeles"
                                 Style="{DynamicResource IconButton}" />
                         <!-- Desvincular el media. El glifo era ↺ y se leia como "recargar" o
                              "deshacer"; ⏏ (expulsar) dice lo que hace sin tener que leer nada. -->
