@@ -19,6 +19,7 @@ internal static class Program
         SwapIntercambiaContenidos();
         SwapSobreSectorVacioEsUnMovimiento();
         VolumenYSilencioSobrevivenElGuardado();
+        DistribuirDejaTodosLosSectoresIguales();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -111,5 +112,52 @@ internal static class Program
         }
 
         File.Delete(archivo);
+    }
+
+    /// <summary>
+    /// El caso que hace de esta prueba algo mas que decoracion: el arbol es ASIMETRICO.
+    ///
+    /// Con A | (B / C), la solucion ingenua —poner todos los splits en 0.5— da A=50%, B=25% y
+    /// C=25%, y "se ve casi bien" en un board de dos celdas, que es justo donde uno lo probaria a
+    /// ojo. Recien con tres sectores desbalanceados el error salta. Verificado AL REVES: cambiando
+    /// el Ratio de Distribute a 0.5 fijo, esta prueba FALLA en el primer Check.
+    /// </summary>
+    private static void DistribuirDejaTodosLosSectoresIguales()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 4. DISTRIBUIR REPARTE EN PARTES IGUALES (ARBOL ASIMETRICO) ===");
+
+        var a = new SectorNode();
+        var b = new SectorNode();
+        var c = new SectorNode();
+
+        // A | (B / C) con ratios torcidos a proposito: distribuir tiene que enderezarlos.
+        var derecha = new SplitNode(SplitOrientation.Vertical, b, c, 0.8);
+        LayoutNode raiz = new SplitNode(SplitOrientation.Horizontal, a, derecha, 0.15);
+
+        var vm = new BoardViewModel();
+        vm.ReplaceRoot(raiz);
+        vm.Distribute();
+
+        // El area de una hoja es el PRODUCTO de los ratios desde la raiz. Con tres sectores,
+        // cada uno tiene que valer 1/3 exacto.
+        foreach (var (nombre, sector) in new[] { ("A", a), ("B", b), ("C", c) })
+            Check($"el sector {nombre} ocupa un tercio del board", Math.Abs(Area(sector) - 1.0 / 3) < 0.0001);
+
+        // Y la suma cierra en 1: si diera menos, habria espacio muerto; si diera mas, se pisan.
+        Check("las tres areas suman el board entero", Math.Abs(Area(a) + Area(b) + Area(c) - 1) < 0.0001);
+    }
+
+    /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>
+    private static double Area(LayoutNode hoja)
+    {
+        var area = 1.0;
+        var nodo = hoja;
+        while (nodo.Parent is { } padre)
+        {
+            area *= ReferenceEquals(padre.First, nodo) ? padre.Ratio : 1 - padre.Ratio;
+            nodo = padre;
+        }
+        return area;
     }
 }

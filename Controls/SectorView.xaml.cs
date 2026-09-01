@@ -40,6 +40,12 @@ public partial class SectorView : UserControl
 
     private SectorNode? _node;
 
+    /// <summary>
+    /// La superficie de video está escondida porque el usuario está arrastrando un divisor.
+    /// Vive acá (en la CAPA DE RENDER) y no en el nodo, porque es puramente visual.
+    /// </summary>
+    private bool _frozen;
+
     /// <summary>Lo inyecta <c>BoardView</c> al crear la vista. Es quien sabe partir y cerrar sectores.</summary>
     public BoardViewModel? Board { get; set; }
 
@@ -230,7 +236,12 @@ public partial class SectorView : UserControl
 
         var missing = _node?.MissingPath;
 
-        Video.Visibility = kind == MediaKind.Video ? Visibility.Visible : Visibility.Collapsed;
+        // ⚠ El congelado entra en la MISMA expresión que decide la visibilidad, no como una
+        // asignación aparte: SyncRender puede dispararse en medio de un arrastre (un tick que
+        // cambia MissingPath, por ejemplo) y devolvería el video a la pantalla justo cuando lo
+        // estamos escondiendo. Que la condición sea una sola hace imposible esa carrera.
+        Video.Visibility = kind == MediaKind.Video && !_frozen ? Visibility.Visible : Visibility.Collapsed;
+        FreezeVeil.Visibility = kind == MediaKind.Video && _frozen ? Visibility.Visible : Visibility.Collapsed;
         Still.Visibility = kind == MediaKind.Image ? Visibility.Visible : Visibility.Collapsed;
 
         // "Vacío" y "falta el archivo" son estados DISTINTOS y se ven distinto: uno te invita a
@@ -259,6 +270,32 @@ public partial class SectorView : UserControl
         }
 
         StartWhenSurfaceReady();
+    }
+
+    /// <summary>
+    /// Esconde o devuelve la superficie de video mientras dura un arrastre de splitter.
+    ///
+    /// Lo llama <c>BoardView</c> desde el DragStarted/DragCompleted del GridSplitter, en tándem
+    /// con <c>SectorNode.Freeze/Thaw</c> (que pausa el clip). Acá pasa la otra mitad del arreglo:
+    /// COLAPSAR el VideoView saca su ventana nativa del layout, así WPF deja de reposicionarla
+    /// en cada píxel del arrastre — que es lo que trababa el board con varios videos corriendo.
+    ///
+    /// ⚠ Se colapsa y NO se pone en Hidden. Hidden sigue participando del layout: la ventana se
+    /// seguiría midiendo y arreglando en cada movimiento, o sea que el costo que queremos evitar
+    /// se pagaría igual. Collapsed la saca del cálculo.
+    ///
+    /// El velo solo se muestra si el sector tiene video: en uno vacío o con una imagen no hay
+    /// nada que esconder, y taparlo sería avisar de algo que no está pasando.
+    /// </summary>
+    public void SetFrozen(bool frozen)
+    {
+        if (_frozen == frozen) return;
+        _frozen = frozen;
+
+        var isVideo = (_node?.Kind ?? MediaKind.None) == MediaKind.Video;
+
+        Video.Visibility = isVideo && !frozen ? Visibility.Visible : Visibility.Collapsed;
+        FreezeVeil.Visibility = isVideo && frozen ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>

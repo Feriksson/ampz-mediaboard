@@ -38,6 +38,15 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
     private long _lastSeekTick;
 
+    /// <summary>
+    /// El sector está CONGELADO: su superficie de video está oculta y el clip pausado mientras
+    /// el usuario arrastra un splitter. Ver <see cref="Freeze"/>.
+    /// </summary>
+    public bool IsFrozen { get; private set; }
+
+    /// <summary>Si el clip estaba reproduciendo cuando se congeló, hay que devolverlo a Play al descongelar.</summary>
+    private bool _resumeAfterThaw;
+
     /// <summary>Cuánto dura el enfriamiento en curso. Lo fija quien haya movido el playhead.</summary>
     private long _seekCooldownMs = ReseekCooldownMs;
 
@@ -413,6 +422,60 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     }
 
     /// <summary>
+    /// CONGELA el sector mientras dura un arrastre de splitter.
+    ///
+    /// Redimensionar con varios clips corriendo se ponía inusable, y el motivo es concreto: cada
+    /// sector con video hostea una VENTANA NATIVA (el HWND del VideoView) más la ventana de
+    /// overlay de LibVLCSharp. Al arrastrar el divisor, WPF re-layoutea en CADA píxel del
+    /// movimiento → esas ventanas se reposicionan y se redimensionan decenas de veces por
+    /// segundo, y el vout de VLC tiene que reconfigurar su superficie de salida en cada una,
+    /// mientras además sigue decodificando. Con dos videos ya se nota; con seis el arrastre se
+    /// vuelve un slideshow y quedan rastros de imagen vieja pegados en la pantalla.
+    ///
+    /// La cura ataca las DOS mitades del problema, y hacen falta las dos:
+    /// - Se PAUSA el clip → el decodificador deja de empujar frames a una ventana que se está
+    ///   moviendo.
+    /// - La vista COLAPSA el VideoView (<c>SectorView.SetFrozen</c>) → la ventana nativa sale
+    ///   del layout, así que ni siquiera se la reposiciona durante el arrastre.
+    ///
+    /// ⚠ Solo se recuerda para reanudar lo que estaba REPRODUCIENDO de verdad. Un clip pausado a
+    /// mano, o uno terminado (Ended), no tiene que arrancar solo porque el usuario movió un
+    /// divisor: eso sería la app tomando una decisión que el usuario ya había tomado al revés.
+    /// </summary>
+    public void Freeze()
+    {
+        if (IsFrozen) return;
+        IsFrozen = true;
+        _resumeAfterThaw = false;
+
+        if (Player is { } player && player.IsPlaying)
+        {
+            player.SetPause(true);
+            _resumeAfterThaw = true;
+        }
+    }
+
+    /// <summary>
+    /// Descongela: devuelve el clip a Play si lo habíamos pausado nosotros.
+    ///
+    /// ⚠ Se reinicia el enfriamiento del loop. Durante el congelado el Tick no corrió, así que
+    /// EnforceLoop vuelve a mirar el clip después de un hueco arbitrario (lo que el usuario haya
+    /// tardado en arrastrar); darle un margen antes de que pueda saltar evita que el primer tick
+    /// posterior lea un estado transitorio de VLC recién despausado y relance el clip de prepo.
+    /// </summary>
+    public void Thaw()
+    {
+        if (!IsFrozen) return;
+        IsFrozen = false;
+
+        if (_resumeAfterThaw && Player is { } player) player.SetPause(false);
+        _resumeAfterThaw = false;
+
+        _lastSeekTick = Environment.TickCount64;
+        _seekCooldownMs = ReseekCooldownMs;
+    }
+
+    /// <summary>
     /// Relanza el clip desde <paramref name="ms"/> construyendo un Media NUEVO.
     ///
     /// ⚠ Esto NO es lo mismo que `Player.Stop(); Player.Play();`, y confundirlos fue un bug
@@ -471,6 +534,10 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     {
         var player = Player;
         if (player is null || Kind != MediaKind.Video) return;
+
+        // Congelado = el usuario está arrastrando un splitter. No se refresca la posición ni se
+        // hace cumplir el loop: el clip está pausado y no hay nada que vigilar. Ver Freeze().
+        if (IsFrozen) return;
 
         // Length llega en -1 hasta que VLC terminó de abrir el archivo. En cuanto es válido,
         // fijamos la duración y, si el usuario todavía no marcó nada, la zona de loop arranca

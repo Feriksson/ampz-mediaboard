@@ -18,10 +18,19 @@ public sealed class BoardView : ContentControl
 {
     private readonly BoardViewModel _board;
 
+    /// <summary>
+    /// Qué Grid materializa a cada split. Existe para poder reescribir los ratios EN CALIENTE
+    /// (ver <see cref="ApplyRatios"/>) sin reconstruir el árbol visual: reconstruir obliga a
+    /// re-montar todos los clips, y para mover tres GridLength eso es un precio absurdo.
+    /// Se vacía en cada Rebuild — los Grid de la pasada anterior ya no existen.
+    /// </summary>
+    private readonly Dictionary<SplitNode, Grid> _grids = new();
+
     public BoardView(BoardViewModel board)
     {
         _board = board;
         _board.LayoutChanged += Rebuild;
+        _board.RatiosChanged += ApplyRatios;
         Rebuild();
     }
 
@@ -44,6 +53,7 @@ public sealed class BoardView : ContentControl
         foreach (var sector in SplitNode.Sectors(_board.Root))
             sector.Remount();
 
+        _grids.Clear();
         Content = Build(_board.Root);
     }
 
@@ -113,8 +123,28 @@ public sealed class BoardView : ContentControl
         // El ratio se escribe al MODELO recién al soltar, no en cada píxel del arrastre:
         // durante el drag el GridSplitter ya maneja las GridLength solo. Escribir en cada delta
         // solo sirve para meter ruido y para que un guardado a mitad de arrastre grabe basura.
+        _grids[split] = grid;
+
+        // ══ Congelado durante el arrastre ══
+        // Arrastrar un divisor con varios videos corriendo se ponía inusable: cada sector con
+        // video hostea una ventana nativa que WPF reposiciona en CADA píxel del movimiento, y
+        // VLC tiene que reconfigurar su salida en cada una de esas veces mientras decodifica.
+        // Mientras dura el arrastre los clips se pausan y su superficie se colapsa; al soltar,
+        // vuelven a donde estaban. Ver SectorNode.Freeze.
+        splitter.DragStarted += (_, _) =>
+        {
+            _board.BeginInteractiveResize();
+            SetSectorsFrozen(true);
+        };
+
+        // ⚠ DragCompleted dispara TAMBIÉN cuando el arrastre se cancela con Esc, que es
+        // justamente lo que hace falta: si el descongelado colgara de un final "exitoso", un
+        // Esc a mitad de camino te dejaría el board entero pausado y en negro para siempre.
         splitter.DragCompleted += (_, _) =>
         {
+            SetSectorsFrozen(false);
+            _board.EndInteractiveResize();
+
             var a = horizontal ? grid.ColumnDefinitions[0].Width.Value : grid.RowDefinitions[0].Height.Value;
             var b = horizontal ? grid.ColumnDefinitions[2].Width.Value : grid.RowDefinitions[2].Height.Value;
             var total = a + b;
@@ -122,6 +152,41 @@ public sealed class BoardView : ContentControl
         };
 
         return grid;
+    }
+
+    /// <summary>
+    /// Reescribe las GridLength de los splits desde el modelo, SIN reconstruir nada.
+    ///
+    /// Lo dispara <c>BoardViewModel.RatiosChanged</c> (hoy: el botón "Distribuir"). La diferencia
+    /// con un Rebuild es grande y se nota: acá los VideoView no se tocan, así que ningún clip se
+    /// re-monta, ninguno parpadea y ninguno pierde su posición — los sectores simplemente se
+    /// acomodan al tamaño nuevo.
+    /// </summary>
+    private void ApplyRatios()
+    {
+        foreach (var (split, grid) in _grids)
+        {
+            var first = new GridLength(split.Ratio, GridUnitType.Star);
+            var second = new GridLength(1 - split.Ratio, GridUnitType.Star);
+
+            if (split.Orientation == SplitOrientation.Horizontal)
+            {
+                grid.ColumnDefinitions[0].Width = first;
+                grid.ColumnDefinitions[2].Width = second;
+            }
+            else
+            {
+                grid.RowDefinitions[0].Height = first;
+                grid.RowDefinitions[2].Height = second;
+            }
+        }
+    }
+
+    /// <summary>Esconde (o devuelve) la superficie de video de todos los sectores del board.</summary>
+    private void SetSectorsFrozen(bool frozen)
+    {
+        foreach (var view in FindSectorViews(Content as DependencyObject))
+            view.SetFrozen(frozen);
     }
 
     /// <summary>Recorre el árbol visual juntando los SectorView para poder soltarlos.</summary>

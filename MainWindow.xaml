@@ -28,6 +28,17 @@
                             ToolTip="Ctrl+S — guarda en el archivo .mboard actual" />
                     <Button x:Name="SaveAsButton" Content="Guardar como…" Style="{StaticResource ToolbarButton}"
                             ToolTip="Ctrl+Shift+S — guarda en un archivo .mboard nuevo" />
+
+                    <!-- Separador: lo de la izquierda es el ARCHIVO, lo de la derecha el LAYOUT.
+                         Sin la línea, "Distribuir" se lee como un cuarto botón de guardado. -->
+                    <Border Width="1" Background="#2E2E3A" Margin="8,2,8,2" />
+
+                    <!-- Partir sectores sigue siendo SOLO por los botones de cada cabecera (actúan
+                         sobre el sector que estás mirando, sin ambigüedad). Este botón es la
+                         excepción justificada: reparte el board ENTERO, así que no hay ningún
+                         "¿sobre cuál actúa?" que resolver mirando qué celda está seleccionada. -->
+                    <Button x:Name="DistributeButton" Content="Distribuir" Style="{StaticResource ToolbarButton}"
+                            ToolTip="Ctrl+E — reparte el espacio en partes iguales entre todos los sectores" />
                 </StackPanel>
 
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">

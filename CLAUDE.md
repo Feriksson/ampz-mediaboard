@@ -197,6 +197,72 @@ LayoutNode
   el árbol nunca queda con un split de un solo hijo. Cerrar el ÚLTIMO sector no lo elimina: lo
   VACÍA — un board sin sectores no se puede volver a partir y dejaría la app sin salida.
 
+### ⚠ "Distribuir" NO es poner todos los splits en 0.5
+
+`BoardViewModel.Distribute()` reparte el board en partes iguales, y la parte interesante es por
+qué la solución obvia está mal. En un árbol binario el tamaño de una hoja es el **PRODUCTO** de
+los ratios que hay desde la raíz hasta ella. Con `A | (B / C)` los tres splits al 0.5 dan
+**A=50%, B=25%, C=25%**: igualar los ratios iguala HERMANOS, no sectores.
+
+Lo que sí funciona es repartir según **cuántas hojas cuelgan de cada lado**
+(`ratio = hojas(First) / hojas(total)`): los factores se telescopean por el camino y toda hoja
+termina valiendo exactamente `1/N`, sin importar la forma del árbol ni cómo se mezclen las
+orientaciones. En el ejemplo: la raíz queda en 1/3, el split interno en 0.5, los tres al 33%.
+
+⚠ **NO dispara `LayoutChanged`, dispara `RatiosChanged`** — y la diferencia se ve y se escucha.
+`LayoutChanged` reconstruye el árbol visual entero, lo que obliga a `Remount()` en cada sector:
+VLC reabre TODOS los archivos para retomarlos donde iban. Pagar un re-decode del board completo
+por cambiar tres números es absurdo. `RatiosChanged` lo atiende `BoardView.ApplyRatios`, que
+reescribe las `GridLength` que ya existen usando el mapa `SplitNode → Grid` que se arma en
+`BuildSplit`. Ningún VideoView se toca, ningún clip parpadea, nadie pierde la posición.
+
+El botón vive en la barra superior y no en la cabecera de cada sector, a diferencia de partir.
+No contradice la regla de "partir es solo por los botones del sector": esa regla existe porque
+"partir el sector seleccionado" te obliga a mirar cuál está seleccionado. Distribuir actúa sobre
+el board ENTERO — no hay ningún "¿sobre cuál?" que resolver.
+
+### ⚠ Arrastrar un divisor CONGELA los sectores — no lo saques
+
+Reportado como *"cuando hago resize con varios videos corriendo se pone muy buggy"*. La causa no
+es misteriosa y es la deuda técnica que este mismo documento ya tenía asumida: cada sector con
+video hostea **una ventana nativa** (el HWND del `VideoView`) **más la ventana de overlay** de
+LibVLCSharp. Al arrastrar un `GridSplitter`, WPF re-layoutea en **CADA píxel** del movimiento →
+esas ventanas se reposicionan y redimensionan decenas de veces por segundo, y el vout de VLC
+tiene que reconfigurar su superficie de salida en cada una **mientras sigue decodificando**. Con
+dos clips ya se nota; con seis el arrastre es un slideshow con rastros de imagen vieja pegados.
+
+La cura ataca las DOS mitades, y hacen falta las dos:
+
+| Mitad | Quién | Qué hace |
+|---|---|---|
+| Decodificación | `SectorNode.Freeze/Thaw` | Pausa el clip: el decoder deja de empujar frames a una ventana en movimiento. `Tick()` se saltea los congelados (ni posición ni loop). |
+| Layout | `SectorView.SetFrozen` | **COLAPSA** el VideoView: la ventana nativa sale del layout, así ni siquiera se la reposiciona. |
+
+Lo orquesta `BoardView` desde el `DragStarted`/`DragCompleted` del splitter.
+
+⚠ **Se COLAPSA, no se pone en `Hidden`.** `Hidden` sigue participando del layout: la ventana se
+mediría y arreglaría igual en cada movimiento, o sea que el costo que queremos evitar se pagaría
+completo. `Collapsed` la saca del cálculo.
+
+⚠ **El descongelado cuelga de `DragCompleted`, que dispara TAMBIÉN al cancelar con `Esc`.** Si
+colgara de un final "exitoso", un Esc a mitad de arrastre te dejaría el board entero pausado y en
+negro para siempre.
+
+⚠ **Solo se reanuda lo que estaba REPRODUCIENDO de verdad** (`_resumeAfterThaw`). Un clip que
+vos pausaste a mano, o uno terminado, no puede arrancar solo porque moviste un divisor: eso sería
+la app revirtiendo una decisión tuya.
+
+⚠ En `SyncRender` el congelado entra en la **misma expresión** que decide `Video.Visibility`, no
+como una asignación aparte. `SyncRender` puede dispararse en medio de un arrastre y devolvería el
+video a la pantalla justo cuando lo estamos escondiendo; con una sola condición esa carrera no
+existe.
+
+Queda tapado con un velo ("Redimensionando…") en vez de negro pelado: un sector que se apaga sin
+explicación se lee como que la app se rompió.
+
+**Esto se va con la migración a custom rendering** (`WriteableBitmap`), igual que los cinco bugs
+del HWND: sin ventana nativa no hay nada que reposicionar y el resize es layout de WPF y nada más.
+
 ### Un solo latido para todo el board
 
 `BoardViewModel` tiene **UN** `DispatcherTimer` a ~33ms que itera todos los sectores, **no uno por
@@ -653,6 +719,7 @@ está mostrando un error que no leíste.
 | `Ctrl+S` | Guardar en el archivo actual (si no hay, pregunta dónde) |
 | `Ctrl+Shift+S` | Guardar como… |
 | `Ctrl+V` | Cargar en el sector seleccionado el archivo del portapapeles |
+| `Ctrl+E` | Distribuir: reparte el espacio en partes iguales entre todos los sectores |
 | `F11` | Pantalla completa (toggle) |
 | `Esc` | Salir de pantalla completa |
 
@@ -738,7 +805,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC). `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC). `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
 | raíz | `App`, `MainWindow`, `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---
