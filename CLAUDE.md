@@ -774,6 +774,7 @@ está mostrando un error que no leíste.
 | `Ctrl+S` | Guardar en el archivo actual (si no hay, pregunta dónde) |
 | `Ctrl+Shift+S` | Guardar como… |
 | `Ctrl+V` | Cargar en el sector seleccionado el archivo del portapapeles |
+| doble click | Copiar al portapapeles el path del archivo del sector |
 | `Ctrl+E` | Distribuir: reparte el espacio en partes iguales entre todos los sectores |
 | `F11` | Pantalla completa (toggle) |
 | `Esc` | Salir de pantalla completa |
@@ -813,6 +814,31 @@ Por eso existen las dos vías precisas, y ninguna es "arrastrar mejor":
   puede ser más preciso que 10ms/px, y un "fino" más grueso que el normal se lee como un bug.
 
 Va con tooltip en los thumbs: un modificador que nadie sabe que existe, no existe.
+
+### Doble click en el sector = copiar el path
+
+Mismo efecto que el botón `⧉` de la cabecera, pero sobre una superficie grande en vez de un
+botón de 22px. Reusa `CopyPathToClipboard()`, así que hereda el visto de confirmación y el
+`SetDataObject(..., copy: true)` que hace que el path sobreviva al cierre de la app.
+
+⚠ **Funciona TAMBIÉN sobre el área de video, y eso no era lo esperado.** Esa área es un HWND
+hosteado, y el airspace es justo el motivo por el que el asa de arrastre es la cabecera y no el
+video — así que la suposición razonable era que el doble click ahí no llegaría. Se midió y
+llega: la ventana nativa de VLC no se queda con los mensajes de mouse.
+
+Está verificado por `tools/test-doubleclick.ps1`, que manda un doble click REAL con `SendInput`
+y **lee el portapapeles**. ⚠ Y antes de creerse el resultado sobre el video, comprueba que abajo
+del cursor haya video CORRIENDO: muestrea el pixel dos veces separadas en el tiempo y exige que
+CAMBIE. Sin esa guarda la prueba sería un fraude — si VLC no renderizara nada, ese punto sería
+WPF pelado, el click funcionaría igual y estaríamos concluyendo algo sobre un HWND que no está.
+
+⚠ Por eso ese test usa un clip PROPIO (`mandelbrot`) y no el `ampz-loop-clip.mp4` compartido: el
+patrón `testsrc` tiene el **centro estático**, el pixel no cambiaba nunca y la prueba se acusaba
+a sí misma de no tener video. El clip de una prueba de movimiento tiene que MOVERSE en todos lados.
+
+Quedan afuera los controles interactivos (botones, el volumen, el riel de la timeline): un doble
+click ahí es el usuario operando ESE control, no pidiendo un path. Y un sector vacío no hace
+nada — que se abra un explorador porque hiciste dos clicks de más es de lo que nadie pidió.
 
 ### Las TRES formas de poner un clip en un sector
 
@@ -860,7 +886,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC). `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path). `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
 | raíz | `App`, `MainWindow`, `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---

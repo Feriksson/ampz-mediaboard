@@ -66,6 +66,9 @@ public partial class SectorView : UserControl
 
         Timeline.SeekRequested += (_, ms) => _node?.SeekTo(ms);
 
+        // Doble click en el sector = copiar el path al portapapeles. Ver OnSectorDoubleClick.
+        MouseDoubleClick += OnSectorDoubleClick;
+
         // PreviewMouseDown (no MouseDown): el evento tiene que llegarnos ANTES de que un botón
         // de la cabecera lo consuma, así hacer click en "partir" también selecciona el sector.
         PreviewMouseDown += (_, _) => { if (_node is not null) Board?.Select(_node); };
@@ -296,6 +299,48 @@ public partial class SectorView : UserControl
 
         Video.Visibility = isVideo && !frozen ? Visibility.Visible : Visibility.Collapsed;
         FreezeVeil.Visibility = isVideo && frozen ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// Doble click en el sector: copia el path al portapapeles. Es el mismo atajo que el botón
+    /// &#x29C9; de la cabecera, pero sobre una superficie grande en vez de un botón de 22px.
+    ///
+    /// ⚠ Funciona TAMBIÉN sobre el área de video, y eso NO era lo esperado: esa área es un HWND
+    /// hosteado, y el airspace es justamente el motivo por el que el asa de arrastre es la
+    /// cabecera y no el video. La ventana nativa de VLC resulta que NO se queda con los mensajes
+    /// de mouse, así que llegan a WPF igual.
+    ///
+    /// Esto está MEDIDO, no supuesto: `tools/test-doubleclick.ps1` manda un doble click de
+    /// verdad sobre el centro del video y lee el portapapeles. Y antes de creerse el resultado
+    /// comprueba que abajo del cursor haya video CORRIENDO (muestrea el pixel dos veces y exige
+    /// que cambie) — sin eso, un video que no renderiza dejaría WPF pelado en ese punto y la
+    /// prueba estaría midiendo cualquier cosa.
+    ///
+    /// Si algún día deja de andar sobre el video (otro módulo de salida de VLC, por ejemplo), la
+    /// cabecera y la barra de transporte son WPF puro y siguen siendo la superficie garantizada
+    /// — igual que el drop target de la cabecera. Y el botón &#x29C9; sigue estando siempre.
+    ///
+    /// Los controles interactivos quedan afuera: un doble click en "partir", en el volumen o en
+    /// el riel de la timeline es el usuario operando ESE control, no pidiendo un path. Los
+    /// botones ya marcan el evento como manejado y no llegarían acá, pero la verificación es
+    /// explícita porque depender de ese detalle es depender de que nadie agregue un control que
+    /// no lo haga.
+    /// </summary>
+    private void OnSectorDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject source &&
+            (FindAncestor<ButtonBase>(source) is not null ||
+             FindAncestor<Slider>(source) is not null ||
+             FindAncestor<LoopTimeline>(source) is not null))
+            return;
+
+        // Sin path no hay nada que copiar. Un sector vacío no hace NADA con el doble click: no
+        // abre el diálogo de archivo ni inventa una acción — que aparezca un explorador porque
+        // hiciste dos clicks de más es de esas cosas que nadie pidió.
+        if ((_node?.MediaPath ?? _node?.MissingPath) is not { Length: > 0 }) return;
+
+        CopyPathToClipboard();
+        e.Handled = true;
     }
 
     /// <summary>
