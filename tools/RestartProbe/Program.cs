@@ -2,6 +2,7 @@
 // Es la misma razón por la que el .csproj de la app lo declara a mano.
 using System.IO;
 using AmpzMediaBoard.Layout;
+using LibVLCSharp.Shared;
 
 // Prueba de REGRESION: cuando un clip que fue MOVIDO DE CELDA (o re-montado al partir un sector)
 // llega al final, tiene que volver al marker A — no a la posicion en la que estaba cuando lo
@@ -42,6 +43,9 @@ internal static class Program
         // se queda en el :start-time (que acá es MAYOR que A, o sea el error se vería igual).
         Escenario("A en 1,0s, llega desde otra celda arrancando en 2,5s",
             clip, llegaEnMs: 2500, loopStartMs: 1000);
+
+        // Caso 3: el intervalo NEGRO entre repeticiones. Ver TailGuardMs en SectorNode.
+        LoopeaSinReabrirElArchivo(clip);
 
         Console.WriteLine();
         if (_fallas == 0) Console.WriteLine("=== TODO OK ===");
@@ -130,6 +134,99 @@ internal static class Program
             Console.WriteLine("  [OK ] volvió al marker A");
         else
             Fallo($"VOLVIÓ AL :start-time ({llegaEnMs:0} ms) EN VEZ DEL MARKER A ({loopStartMs:0} ms) — es el bug original");
+
+        Console.WriteLine();
+    }
+
+    /// <summary>
+    /// El clip con la ZONA POR DEFECTO tiene que dar la vuelta SIN reabrir el archivo.
+    ///
+    /// Reportado como "entre repetición y repetición aparece un intervalo negro". La causa no
+    /// era la config de VLC: con B pegado al final, el playhead nunca alcanzaba a cruzarlo
+    /// porque VLC cortaba el stream primero → el loop caía siempre en RestartFrom, que hace
+    /// Stop() + Media nuevo + Play(), o sea reabrir el archivo entero. Eso son cientos de ms de
+    /// pantalla negra, en el caso MÁS COMÚN de la app.
+    ///
+    /// ⚠ EL DISCRIMINADOR ES EL ESTADO DE VLC, no la posición, y esto se aprendió escribiendo
+    /// esta misma prueba. Mirar "hasta dónde llegó el playhead" NO sirve para detectar el bug:
+    /// cuando el clip termina, Tick() atiende el Ended y RestartFrom pone PositionMs en el
+    /// marker A dentro de la MISMA vuelta, así que el pico nunca se llega a muestrear. Contra el
+    /// código roto, "dio la vuelta antes del final" daba OK igual. Otro verde que no se podía
+    /// poner en rojo.
+    ///
+    /// Lo que sí distingue es preguntarle a VLC si pasó por Ended/Stopped, y hay que mirarlo
+    /// ANTES de cada Tick: Tick() es justamente quien lo atiende (relanza y el player vuelve a
+    /// Playing en el acto), así que después ya llegaste tarde.
+    ///
+    /// El margen se verifica igual, con un piso de 100ms, y ahí sí es informativo: cubre a
+    /// TailGuardMs. Sin ese margen el loop corta ~49ms antes del final — funciona en una máquina
+    /// ociosa, pero es un tick y medio de aire, y con seis clips decodificando la cola del
+    /// Dispatcher se atrasa más que eso y el clip termina igual.
+    ///
+    /// Verificado AL REVÉS, las dos mitades:
+    ///   - anulando la extrapolación de Tick() → falla 2 de cada 3 corridas (la lotería original);
+    ///   - con TailGuardMs = 0 → el margen cae a ~49ms y falla el piso de 100ms.
+    /// </summary>
+    private static void LoopeaSinReabrirElArchivo(string clip)
+    {
+        Console.WriteLine("=== 3. LA ZONA POR DEFECTO LOOPEA SIN REABRIR EL ARCHIVO (sin intervalo negro) ===");
+
+        using var nodo = new SectorNode();
+
+        // Un clip recién soltado: desde 0 y sin tocar un solo marker. La zona por defecto la fija
+        // el propio Tick en cuanto VLC reporta la duración.
+        nodo.Load(clip, 0);
+        nodo.LoopEnabled = true;
+        nodo.StartPending();
+
+        Bombear(nodo, hasta: () => nodo.DurationMs > 0, limiteMs: 5000);
+        if (nodo.DurationMs <= 0)
+        {
+            Fallo("VLC nunca reportó la duración del clip");
+            return;
+        }
+        Console.WriteLine($"  duración: {nodo.DurationMs:0} ms   (zona por defecto: 0 → {nodo.LoopEndMs:0} ms)");
+
+        var maxima = nodo.PositionMs;
+        var anterior = nodo.PositionMs;
+        var tocoEnded = false;
+        var dioLaVuelta = false;
+
+        var arranque = Environment.TickCount64;
+        while (Environment.TickCount64 - arranque < 15000 && !dioLaVuelta)
+        {
+            if (nodo.Player is { } p && p.State is VLCState.Ended or VLCState.Stopped) tocoEnded = true;
+
+            nodo.Tick();
+
+            var pos = nodo.PositionMs;
+            maxima = Math.Max(maxima, pos);
+            if (pos < anterior - 500) dioLaVuelta = true;
+            anterior = pos;
+
+            Thread.Sleep(33);
+        }
+
+        if (!dioLaVuelta)
+        {
+            Fallo("el clip NUNCA volvió a empezar: el loop no disparó");
+            return;
+        }
+
+        var sobro = nodo.DurationMs - maxima;
+        Console.WriteLine($"  posición máxima alcanzada: {maxima:0} ms   (dio la vuelta {sobro:0} ms antes del final)");
+
+        // El piso NO es "algo mayor que cero": es el colchón que tiene que quedar para que el
+        // corte siga cayendo del lado bueno cuando la máquina está cargada. Ver TailGuardMs.
+        if (sobro > 100)
+            Console.WriteLine("  [OK ] dio la vuelta con margen de sobra antes del final");
+        else
+            Fallo($"cortó a solo {sobro:0} ms del final: sin colchón, bajo carga el clip va a terminar igual y volver al reinicio caro");
+
+        if (!tocoEnded)
+            Console.WriteLine("  [OK ] VLC nunca pasó por Ended/Stopped: el input quedó abierto todo el tiempo");
+        else
+            Fallo("VLC pasó por Ended/Stopped: el archivo se reabrió y la imagen se fue a negro");
 
         Console.WriteLine();
     }

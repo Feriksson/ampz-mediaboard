@@ -141,6 +141,23 @@
                      al aparecer se convierte ÉL MISMO en el elemento bajo el cursor → se dispara
                      DragLeave → el velo se apaga → el DragOver siguiente lo vuelve a prender.
                      Ese ciclo es el parpadeo. -->
+                <!-- Velo de CONGELADO: se prende mientras el usuario arrastra un divisor.
+                     Durante el arrastre el VideoView se colapsa (su ventana nativa sale del
+                     layout) y el clip se pausa; sin este cartel el sector quedaría en negro y
+                     parecería que se rompió. Ver SectorView.SetFrozen y SectorNode.Freeze.
+                     IsHitTestVisible=False para no interferir con el arrastre del splitter. -->
+                <Border x:Name="FreezeVeil" Visibility="Collapsed" IsHitTestVisible="False"
+                        Background="#12121A">
+                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                        <TextBlock Text="&#x2921;" FontFamily="Segoe UI Symbol" FontSize="22"
+                                   HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource HintBrush}" />
+                        <TextBlock Text="Redimensionando…" Margin="0,6,0,0" FontSize="11"
+                                   HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource HintBrush}" />
+                    </StackPanel>
+                </Border>
+
                 <Border x:Name="DropVeil" Visibility="Collapsed" IsHitTestVisible="False"
                         Background="{DynamicResource DropVeilBrush}"
                         BorderBrush="{DynamicResource AccentBrush}" BorderThickness="2" CornerRadius="4">

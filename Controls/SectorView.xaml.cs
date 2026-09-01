@@ -40,6 +40,12 @@ public partial class SectorView : UserControl
 
     private SectorNode? _node;
 
+    /// <summary>
+    /// La superficie de video está escondida porque el usuario está arrastrando un divisor.
+    /// Vive acá (en la CAPA DE RENDER) y no en el nodo, porque es puramente visual.
+    /// </summary>
+    private bool _frozen;
+
     /// <summary>Lo inyecta <c>BoardView</c> al crear la vista. Es quien sabe partir y cerrar sectores.</summary>
     public BoardViewModel? Board { get; set; }
 
@@ -59,6 +65,9 @@ public partial class SectorView : UserControl
         RelinkButton.Click += (_, _) => BrowseForMedia();
 
         Timeline.SeekRequested += (_, ms) => _node?.SeekTo(ms);
+
+        // Doble click en el sector = copiar el path al portapapeles. Ver OnSectorDoubleClick.
+        MouseDoubleClick += OnSectorDoubleClick;
 
         // PreviewMouseDown (no MouseDown): el evento tiene que llegarnos ANTES de que un botón
         // de la cabecera lo consuma, así hacer click en "partir" también selecciona el sector.
@@ -230,7 +239,12 @@ public partial class SectorView : UserControl
 
         var missing = _node?.MissingPath;
 
-        Video.Visibility = kind == MediaKind.Video ? Visibility.Visible : Visibility.Collapsed;
+        // ⚠ El congelado entra en la MISMA expresión que decide la visibilidad, no como una
+        // asignación aparte: SyncRender puede dispararse en medio de un arrastre (un tick que
+        // cambia MissingPath, por ejemplo) y devolvería el video a la pantalla justo cuando lo
+        // estamos escondiendo. Que la condición sea una sola hace imposible esa carrera.
+        Video.Visibility = kind == MediaKind.Video && !_frozen ? Visibility.Visible : Visibility.Collapsed;
+        FreezeVeil.Visibility = kind == MediaKind.Video && _frozen ? Visibility.Visible : Visibility.Collapsed;
         Still.Visibility = kind == MediaKind.Image ? Visibility.Visible : Visibility.Collapsed;
 
         // "Vacío" y "falta el archivo" son estados DISTINTOS y se ven distinto: uno te invita a
@@ -259,6 +273,74 @@ public partial class SectorView : UserControl
         }
 
         StartWhenSurfaceReady();
+    }
+
+    /// <summary>
+    /// Esconde o devuelve la superficie de video mientras dura un arrastre de splitter.
+    ///
+    /// Lo llama <c>BoardView</c> desde el DragStarted/DragCompleted del GridSplitter, en tándem
+    /// con <c>SectorNode.Freeze/Thaw</c> (que pausa el clip). Acá pasa la otra mitad del arreglo:
+    /// COLAPSAR el VideoView saca su ventana nativa del layout, así WPF deja de reposicionarla
+    /// en cada píxel del arrastre — que es lo que trababa el board con varios videos corriendo.
+    ///
+    /// ⚠ Se colapsa y NO se pone en Hidden. Hidden sigue participando del layout: la ventana se
+    /// seguiría midiendo y arreglando en cada movimiento, o sea que el costo que queremos evitar
+    /// se pagaría igual. Collapsed la saca del cálculo.
+    ///
+    /// El velo solo se muestra si el sector tiene video: en uno vacío o con una imagen no hay
+    /// nada que esconder, y taparlo sería avisar de algo que no está pasando.
+    /// </summary>
+    public void SetFrozen(bool frozen)
+    {
+        if (_frozen == frozen) return;
+        _frozen = frozen;
+
+        var isVideo = (_node?.Kind ?? MediaKind.None) == MediaKind.Video;
+
+        Video.Visibility = isVideo && !frozen ? Visibility.Visible : Visibility.Collapsed;
+        FreezeVeil.Visibility = isVideo && frozen ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// Doble click en el sector: copia el path al portapapeles. Es el mismo atajo que el botón
+    /// &#x29C9; de la cabecera, pero sobre una superficie grande en vez de un botón de 22px.
+    ///
+    /// ⚠ Funciona TAMBIÉN sobre el área de video, y eso NO era lo esperado: esa área es un HWND
+    /// hosteado, y el airspace es justamente el motivo por el que el asa de arrastre es la
+    /// cabecera y no el video. La ventana nativa de VLC resulta que NO se queda con los mensajes
+    /// de mouse, así que llegan a WPF igual.
+    ///
+    /// Esto está MEDIDO, no supuesto: `tools/test-doubleclick.ps1` manda un doble click de
+    /// verdad sobre el centro del video y lee el portapapeles. Y antes de creerse el resultado
+    /// comprueba que abajo del cursor haya video CORRIENDO (muestrea el pixel dos veces y exige
+    /// que cambie) — sin eso, un video que no renderiza dejaría WPF pelado en ese punto y la
+    /// prueba estaría midiendo cualquier cosa.
+    ///
+    /// Si algún día deja de andar sobre el video (otro módulo de salida de VLC, por ejemplo), la
+    /// cabecera y la barra de transporte son WPF puro y siguen siendo la superficie garantizada
+    /// — igual que el drop target de la cabecera. Y el botón &#x29C9; sigue estando siempre.
+    ///
+    /// Los controles interactivos quedan afuera: un doble click en "partir", en el volumen o en
+    /// el riel de la timeline es el usuario operando ESE control, no pidiendo un path. Los
+    /// botones ya marcan el evento como manejado y no llegarían acá, pero la verificación es
+    /// explícita porque depender de ese detalle es depender de que nadie agregue un control que
+    /// no lo haga.
+    /// </summary>
+    private void OnSectorDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject source &&
+            (FindAncestor<ButtonBase>(source) is not null ||
+             FindAncestor<Slider>(source) is not null ||
+             FindAncestor<LoopTimeline>(source) is not null))
+            return;
+
+        // Sin path no hay nada que copiar. Un sector vacío no hace NADA con el doble click: no
+        // abre el diálogo de archivo ni inventa una acción — que aparezca un explorador porque
+        // hiciste dos clicks de más es de esas cosas que nadie pidió.
+        if ((_node?.MediaPath ?? _node?.MissingPath) is not { Length: > 0 }) return;
+
+        CopyPathToClipboard();
+        e.Handled = true;
     }
 
     /// <summary>

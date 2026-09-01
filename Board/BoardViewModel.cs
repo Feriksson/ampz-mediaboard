@@ -23,6 +23,18 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     /// </summary>
     public event Action? LayoutChanged;
 
+    /// <summary>
+    /// Se dispara cuando cambiaron los RATIOS de los splits pero NO la forma del árbol.
+    ///
+    /// Es un evento aparte de <see cref="LayoutChanged"/> a propósito, y la diferencia no es
+    /// cosmética: LayoutChanged reconstruye el árbol visual ENTERO, lo que obliga a re-montar
+    /// todos los clips (los VideoView se destruyen y VLC tiene que reabrir cada archivo desde
+    /// donde iba — ver SectorNode.Remount). Para "repartir el espacio en partes iguales" eso
+    /// sería pagar un re-decode de todo el board por cambiar tres números: la vista solo tiene
+    /// que reescribir las GridLength que ya existen, sin tocar una sola ventana de video.
+    /// </summary>
+    public event Action? RatiosChanged;
+
     [ObservableProperty] private LayoutNode _root;
     [ObservableProperty] private SectorNode? _selected;
 
@@ -141,6 +153,61 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         source.Restore(fromTarget);
 
         Select(target);
+    }
+
+    /// <summary>
+    /// Reparte el espacio en partes IGUALES entre todos los sectores, en los dos ejes a la vez.
+    ///
+    /// ⚠ Poner todos los splits en 0.5 NO alcanza, y es el error obvio. En un árbol binario el
+    /// tamaño de una hoja es el PRODUCTO de los ratios que hay desde la raíz hasta ella: con un
+    /// board partido en A | (B / C), los tres al 0.5 dan A=50%, B=25% y C=25%. Igualar los
+    /// ratios iguala los HERMANOS, no los sectores.
+    ///
+    /// Lo que sí funciona es repartir según CUÁNTAS HOJAS cuelgan de cada lado. Si cada split le
+    /// da a cada hijo una porción proporcional a sus sectores, los factores se telescopean por el
+    /// camino y toda hoja termina valiendo exactamente 1/N del board — sin importar la forma del
+    /// árbol ni cómo se mezclen las orientaciones. En el ejemplo: la raíz queda en 1/3 (A) contra
+    /// 2/3 (B y C), y el split interno en 0.5. Los tres al 33%.
+    /// </summary>
+    public void Distribute()
+    {
+        DistributeInto(Root);
+        RatiosChanged?.Invoke();
+    }
+
+    private static void DistributeInto(LayoutNode node)
+    {
+        if (node is not SplitNode split) return;
+
+        var first = LeafCount(split.First);
+        var second = LeafCount(split.Second);
+        split.Ratio = (double)first / (first + second);
+
+        DistributeInto(split.First);
+        DistributeInto(split.Second);
+    }
+
+    /// <summary>Cuántos sectores (hojas) cuelgan de este subárbol.</summary>
+    private static int LeafCount(LayoutNode node) =>
+        node is SplitNode split ? LeafCount(split.First) + LeafCount(split.Second) : 1;
+
+    /// <summary>
+    /// Arranca un arrastre de splitter: congela TODOS los sectores (pausa + oculta el video).
+    ///
+    /// Es global y no solo para los dos sectores del splitter que se está moviendo, por un
+    /// motivo geométrico: mover un divisor cambia el ancho de una columna, y eso re-layoutea a
+    /// todos los que viven dentro de ella. Congelar solo el par vecino dejaría el resto del
+    /// board igual de trabado. Ver SectorNode.Freeze para el por qué del problema.
+    /// </summary>
+    public void BeginInteractiveResize()
+    {
+        foreach (var sector in AllSectors) sector.Freeze();
+    }
+
+    /// <summary>Termina el arrastre: descongela y devuelve a Play lo que estaba reproduciendo.</summary>
+    public void EndInteractiveResize()
+    {
+        foreach (var sector in AllSectors) sector.Thaw();
     }
 
     /// <summary>Reemplaza el board entero (lo usa la carga desde disco).</summary>

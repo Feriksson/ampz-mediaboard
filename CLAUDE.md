@@ -197,6 +197,72 @@ LayoutNode
   el árbol nunca queda con un split de un solo hijo. Cerrar el ÚLTIMO sector no lo elimina: lo
   VACÍA — un board sin sectores no se puede volver a partir y dejaría la app sin salida.
 
+### ⚠ "Distribuir" NO es poner todos los splits en 0.5
+
+`BoardViewModel.Distribute()` reparte el board en partes iguales, y la parte interesante es por
+qué la solución obvia está mal. En un árbol binario el tamaño de una hoja es el **PRODUCTO** de
+los ratios que hay desde la raíz hasta ella. Con `A | (B / C)` los tres splits al 0.5 dan
+**A=50%, B=25%, C=25%**: igualar los ratios iguala HERMANOS, no sectores.
+
+Lo que sí funciona es repartir según **cuántas hojas cuelgan de cada lado**
+(`ratio = hojas(First) / hojas(total)`): los factores se telescopean por el camino y toda hoja
+termina valiendo exactamente `1/N`, sin importar la forma del árbol ni cómo se mezclen las
+orientaciones. En el ejemplo: la raíz queda en 1/3, el split interno en 0.5, los tres al 33%.
+
+⚠ **NO dispara `LayoutChanged`, dispara `RatiosChanged`** — y la diferencia se ve y se escucha.
+`LayoutChanged` reconstruye el árbol visual entero, lo que obliga a `Remount()` en cada sector:
+VLC reabre TODOS los archivos para retomarlos donde iban. Pagar un re-decode del board completo
+por cambiar tres números es absurdo. `RatiosChanged` lo atiende `BoardView.ApplyRatios`, que
+reescribe las `GridLength` que ya existen usando el mapa `SplitNode → Grid` que se arma en
+`BuildSplit`. Ningún VideoView se toca, ningún clip parpadea, nadie pierde la posición.
+
+El botón vive en la barra superior y no en la cabecera de cada sector, a diferencia de partir.
+No contradice la regla de "partir es solo por los botones del sector": esa regla existe porque
+"partir el sector seleccionado" te obliga a mirar cuál está seleccionado. Distribuir actúa sobre
+el board ENTERO — no hay ningún "¿sobre cuál?" que resolver.
+
+### ⚠ Arrastrar un divisor CONGELA los sectores — no lo saques
+
+Reportado como *"cuando hago resize con varios videos corriendo se pone muy buggy"*. La causa no
+es misteriosa y es la deuda técnica que este mismo documento ya tenía asumida: cada sector con
+video hostea **una ventana nativa** (el HWND del `VideoView`) **más la ventana de overlay** de
+LibVLCSharp. Al arrastrar un `GridSplitter`, WPF re-layoutea en **CADA píxel** del movimiento →
+esas ventanas se reposicionan y redimensionan decenas de veces por segundo, y el vout de VLC
+tiene que reconfigurar su superficie de salida en cada una **mientras sigue decodificando**. Con
+dos clips ya se nota; con seis el arrastre es un slideshow con rastros de imagen vieja pegados.
+
+La cura ataca las DOS mitades, y hacen falta las dos:
+
+| Mitad | Quién | Qué hace |
+|---|---|---|
+| Decodificación | `SectorNode.Freeze/Thaw` | Pausa el clip: el decoder deja de empujar frames a una ventana en movimiento. `Tick()` se saltea los congelados (ni posición ni loop). |
+| Layout | `SectorView.SetFrozen` | **COLAPSA** el VideoView: la ventana nativa sale del layout, así ni siquiera se la reposiciona. |
+
+Lo orquesta `BoardView` desde el `DragStarted`/`DragCompleted` del splitter.
+
+⚠ **Se COLAPSA, no se pone en `Hidden`.** `Hidden` sigue participando del layout: la ventana se
+mediría y arreglaría igual en cada movimiento, o sea que el costo que queremos evitar se pagaría
+completo. `Collapsed` la saca del cálculo.
+
+⚠ **El descongelado cuelga de `DragCompleted`, que dispara TAMBIÉN al cancelar con `Esc`.** Si
+colgara de un final "exitoso", un Esc a mitad de arrastre te dejaría el board entero pausado y en
+negro para siempre.
+
+⚠ **Solo se reanuda lo que estaba REPRODUCIENDO de verdad** (`_resumeAfterThaw`). Un clip que
+vos pausaste a mano, o uno terminado, no puede arrancar solo porque moviste un divisor: eso sería
+la app revirtiendo una decisión tuya.
+
+⚠ En `SyncRender` el congelado entra en la **misma expresión** que decide `Video.Visibility`, no
+como una asignación aparte. `SyncRender` puede dispararse en medio de un arrastre y devolvería el
+video a la pantalla justo cuando lo estamos escondiendo; con una sola condición esa carrera no
+existe.
+
+Queda tapado con un velo ("Redimensionando…") en vez de negro pelado: un sector que se apaga sin
+explicación se lee como que la app se rompió.
+
+**Esto se va con la migración a custom rendering** (`WriteableBitmap`), igual que los cinco bugs
+del HWND: sin ventana nativa no hay nada que reposicionar y el resize es layout de WPF y nada más.
+
 ### Un solo latido para todo el board
 
 `BoardViewModel` tiene **UN** `DispatcherTimer` a ~33ms que itera todos los sectores, **no uno por
@@ -274,11 +340,66 @@ La zona se **sanea en cada vuelta** en vez de confiar en los campos crudos: si `
 se inicializó o quedó fuera de rango por un board editado a mano, el loop igual corre sobre el clip
 entero en vez de no hacer nada.
 
+### ⚠ El INTERVALO NEGRO entre repeticiones — y por qué no era una config de VLC
+
+Reportado como *"con varios videos, entre repetición y repetición aparece un intervalo negro"*.
+Se buscó un flag de VLC para ajustar; **no existe**, porque la causa está en cuál de los dos
+caminos de vuelta al marker A tomaba el loop:
+
+| Camino | Cuándo | Qué hace VLC | Costo |
+|---|---|---|---|
+| `SeekTo` | el playhead cruza B a mitad de clip | mueve el input, que sigue ABIERTO | hipito de decenas de ms, la imagen NO se va |
+| `RestartFrom` | el clip llegó a `Ended` | `Stop()` + Media NUEVO + `Play()`: reabre el archivo, re-inicializa demuxer y codec, vuelve a llenar el caché | **cientos de ms EN NEGRO** |
+
+Con la zona por defecto (B = duración) caía SIEMPRE en la fila de abajo: el playhead nunca
+alcanzaba a cruzar B porque VLC cortaba el stream primero. O sea que el caso MÁS COMÚN de la app
+—soltar un clip y que loopee entero— era justo el que pagaba el reinicio caro. Con varios
+sectores empeora: si los clips duran parecido se sincronizan y reabren todos a la vez.
+
+El arreglo tiene DOS mitades, y la segunda es la que de verdad importa:
+
+**1. `TailGuardMs = 150`** — la zona efectiva se cierra 150ms antes del final real, así el
+playhead cruza B ANTES de que VLC llegue a `Ended` y el loop pasa a ser un seek. Es un `Min`, así
+que a un marker B puesto a mitad de clip NO lo toca: solo muerde cuando B está pegado al final.
+El precio es perder los últimos ~150ms; imperceptible al lado de medio segundo en negro.
+
+**2. ⚠ `player.Time` NO AVANZA CONTINUO — se actualiza A SALTOS.** Esto es lo que hacía que la
+mitad 1 sola fuera **una lotería**, y no se descubrió razonando sino MIDIENDO con `RestartProbe`:
+sobre un clip de 4s a 25fps el valor se queda quieto ~10 ticks y después salta **~324ms de una**.
+La resolución real de la posición es un orden de magnitud PEOR que el latido de 33ms. Si el
+último salto caía por debajo del umbral, el clip llegaba al final igual — con el guard puesto,
+el test fallaba 2 de cada 3 corridas.
+→ Fix: entre salto y salto `Tick()` estima la posición con el **reloj de pared** (`_lastRealTimeMs`
++ transcurrido), que es lo que hace la barra de progreso de cualquier reproductor. Bonus real: el
+playhead de la timeline dejó de moverse a los tirones.
+- Solo se estima **mientras reproduce**: en pausa el playhead se iría solo con el video quieto.
+- Techo `MaxExtrapolationMs = 600`: si VLC se cuelga (buffering, disco lento) la estimación no
+  puede correr sola para siempre.
+- `Reanchor()` en `SeekTo`/`RestartFrom`: tras un salto deliberado VLC devuelve la posición VIEJA
+  por un par de vueltas, y sin reanclar la estimación te arrastra de vuelta al punto del que
+  saltaste.
+
+`RestartFrom` **NO se eliminó**: sigue siendo la red por si un tick se pierde del todo. Es el
+camino excepcional ahora, no el normal.
+
+Regresión: `tools/test-restart.ps1`, caso 3. ⚠ **El discriminador es el ESTADO de VLC, no la
+posición** — y esto costó una vuelta: mirar "hasta dónde llegó el playhead" da OK **también contra
+el código roto**, porque `RestartFrom` pisa `PositionMs` con el marker A dentro de la MISMA vuelta
+del Tick y el pico nunca se muestrea. Hay que preguntar si el player pasó por `Ended`/`Stopped`, y
+**antes** de llamar a `Tick()` (que es quien lo atiende y devuelve el estado a `Playing` en el
+acto). Verificado en rojo por las dos mitades: sin extrapolación falla 2 de 3 corridas; con
+`TailGuardMs = 0` el margen cae a ~45ms y falla el piso de 100ms.
+
+⚠ Esto NO vuelve el loop invisible: el seek de VLC sigue sin ser frame-exact y queda el hipito de
+decenas de ms que este documento ya declara aceptable. Lo que se fue es el NEGRO. Un loop
+verdaderamente sin costura sigue exigiendo pre-decodificar la zona a RAM (anotado como v2).
+
 Dos constantes que NO son arbitrarias:
 - `LoopGuardMs = 40` — el polling es de 33ms; si esperáramos a superar B exacto nos pasaríamos de
   largo. Se dispara un poco antes.
 - `ReseekCooldownMs = 150` — sin enfriamiento, una zona más corta que la latencia del seek de VLC
   entra en ráfaga de saltos y el video queda congelado tartamudeando.
+- `TailGuardMs = 150` y `MaxExtrapolationMs = 600` — ver la sección del intervalo negro, arriba.
 
 ⚠ **El seek de VLC NO es frame-exact.** Hay un hipito de decenas de ms en el punto del loop. Es
 aceptable para referencia de estudio y es **una limitación del motor, no un bug a cazar**. Un loop
@@ -653,6 +774,8 @@ está mostrando un error que no leíste.
 | `Ctrl+S` | Guardar en el archivo actual (si no hay, pregunta dónde) |
 | `Ctrl+Shift+S` | Guardar como… |
 | `Ctrl+V` | Cargar en el sector seleccionado el archivo del portapapeles |
+| doble click | Copiar al portapapeles el path del archivo del sector |
+| `Ctrl+E` | Distribuir: reparte el espacio en partes iguales entre todos los sectores |
 | `F11` | Pantalla completa (toggle) |
 | `Esc` | Salir de pantalla completa |
 
@@ -691,6 +814,31 @@ Por eso existen las dos vías precisas, y ninguna es "arrastrar mejor":
   puede ser más preciso que 10ms/px, y un "fino" más grueso que el normal se lee como un bug.
 
 Va con tooltip en los thumbs: un modificador que nadie sabe que existe, no existe.
+
+### Doble click en el sector = copiar el path
+
+Mismo efecto que el botón `⧉` de la cabecera, pero sobre una superficie grande en vez de un
+botón de 22px. Reusa `CopyPathToClipboard()`, así que hereda el visto de confirmación y el
+`SetDataObject(..., copy: true)` que hace que el path sobreviva al cierre de la app.
+
+⚠ **Funciona TAMBIÉN sobre el área de video, y eso no era lo esperado.** Esa área es un HWND
+hosteado, y el airspace es justo el motivo por el que el asa de arrastre es la cabecera y no el
+video — así que la suposición razonable era que el doble click ahí no llegaría. Se midió y
+llega: la ventana nativa de VLC no se queda con los mensajes de mouse.
+
+Está verificado por `tools/test-doubleclick.ps1`, que manda un doble click REAL con `SendInput`
+y **lee el portapapeles**. ⚠ Y antes de creerse el resultado sobre el video, comprueba que abajo
+del cursor haya video CORRIENDO: muestrea el pixel dos veces separadas en el tiempo y exige que
+CAMBIE. Sin esa guarda la prueba sería un fraude — si VLC no renderizara nada, ese punto sería
+WPF pelado, el click funcionaría igual y estaríamos concluyendo algo sobre un HWND que no está.
+
+⚠ Por eso ese test usa un clip PROPIO (`mandelbrot`) y no el `ampz-loop-clip.mp4` compartido: el
+patrón `testsrc` tiene el **centro estático**, el pixel no cambiaba nunca y la prueba se acusaba
+a sí misma de no tener video. El clip de una prueba de movimiento tiene que MOVERSE en todos lados.
+
+Quedan afuera los controles interactivos (botones, el volumen, el riel de la timeline): un doble
+click ahí es el usuario operando ESE control, no pidiendo un path. Y un sector vacío no hace
+nada — que se abra un explorador porque hiciste dos clicks de más es de lo que nadie pidió.
 
 ### Las TRES formas de poner un clip en un sector
 
@@ -738,7 +886,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC). `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path). ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
 | raíz | `App`, `MainWindow`, `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---

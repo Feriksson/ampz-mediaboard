@@ -40,6 +40,7 @@ public partial class MainWindow : Window
         OpenButton.Click += (_, _) => OpenWithDialog();
         SaveButton.Click += (_, _) => Save();
         SaveAsButton.Click += (_, _) => _ = SaveAs();
+        DistributeButton.Click += (_, _) => _board.Distribute();
         AssociateButton.Click += (_, _) => Associate();
 
         // PreviewKeyDown y no KeyDown: si el foco quedó en un botón, el KeyDown de Espacio lo
@@ -392,6 +393,14 @@ public partial class MainWindow : Window
                     return;
                 case Key.V:
                     PasteMediaPath();
+                    e.Handled = true;
+                    return;
+
+                // Reparte el espacio en partes iguales. NO pasa por el guard de "hay un sector
+                // seleccionado" que está más abajo: es una acción sobre el board ENTERO, y un
+                // board recién abierto puede no tener ninguna celda activa.
+                case Key.E:
+                    _board.Distribute();
                     e.Handled = true;
                     return;
             }
