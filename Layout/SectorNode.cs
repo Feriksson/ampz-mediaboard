@@ -36,6 +36,62 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// </summary>
     private const long RelaunchCooldownMs = 500;
 
+    /// <summary>
+    /// Cuánto ANTES del final real del clip se cierra la zona de loop, en ms.
+    ///
+    /// Esto es lo que mata el INTERVALO NEGRO entre repetición y repetición, y el porqué está
+    /// en la diferencia de precio entre los dos caminos que tiene EnforceLoop para volver al
+    /// marker A:
+    ///
+    /// | Camino | Cuándo | Qué hace VLC | Costo |
+    /// |---|---|---|---|
+    /// | <c>SeekTo</c>      | el playhead cruza B a mitad de clip | mueve el input, que sigue ABIERTO | hipito de decenas de ms, la imagen NO se va |
+    /// | <c>RestartFrom</c> | el clip llegó a Ended                | <c>Stop()</c> + Media NUEVO + <c>Play()</c>: reabre el archivo, re-inicializa demuxer y codec y vuelve a llenar el caché | **cientos de ms EN NEGRO** |
+    ///
+    /// Con la zona por defecto (B = duración) el loop caía SIEMPRE en la fila de abajo: el
+    /// playhead nunca alcanzaba a "cruzar" B porque VLC cortaba el stream primero. O sea que el
+    /// caso más común de la app —soltar un clip y que loopee entero— era justo el que pagaba el
+    /// reinicio caro. Con varios sectores es peor todavía: si los clips duran parecido se
+    /// sincronizan y reabren todos a la vez, peleándose el disco.
+    ///
+    /// El arreglo es que el playhead cruce B ANTES de que VLC llegue a Ended: la zona efectiva
+    /// se cierra este margen antes del final real. El loop pasa a ser un seek y el negro
+    /// desaparece. El precio es perder los últimos ~150ms del clip; en un board de referencia no
+    /// se percibe, y es un intercambio infinitamente mejor que medio segundo de pantalla negra.
+    ///
+    /// ⚠ El margen NO es arbitrario: el latido es de 33ms, así que 150ms son ~4 ticks de aire.
+    /// Hace falta ese colchón porque bajo carga (seis clips decodificando) la cola del Dispatcher
+    /// se atrasa, y con un margen de un solo tick el clip termina igual y volvés al reinicio caro.
+    ///
+    /// ⚠ <c>RestartFrom</c> NO se elimina: sigue siendo la red por si un tick se pierde del todo
+    /// y el clip llega al final igual. Es el camino excepcional ahora, no el normal.
+    /// </summary>
+    private const double TailGuardMs = 150;
+
+    /// <summary>
+    /// Techo de la EXTRAPOLACIÓN del playhead, en ms. Ver <see cref="Tick"/>.
+    ///
+    /// ⚠ <c>player.Time</c> NO avanza continuo: VLC lo actualiza a SALTOS. Medido con
+    /// <c>tools/RestartProbe</c> sobre un clip de 4s a 25fps, el valor se queda quieto ~10 ticks
+    /// y después salta ~324ms de una. O sea que la resolución real de la posición es un orden de
+    /// magnitud PEOR que nuestro latido de 33ms, y eso rompía dos cosas a la vez: el playhead de
+    /// la timeline se movía a los tirones, y el corte del loop se volvía una lotería (si el
+    /// último salto caía justo por debajo del marker B, el clip llegaba al final igual).
+    ///
+    /// Entre salto y salto la posición se estima con el RELOJ DE PARED, que es exactamente lo
+    /// que hace la barra de progreso de cualquier reproductor.
+    ///
+    /// El techo existe para que un CUELGUE de VLC (buffering, disco lento) no dispare una
+    /// posición inventada que corra sola para siempre: si pasó más que esto sin una lectura
+    /// nueva, se deja de estimar y se muestra el último valor real.
+    /// </summary>
+    private const long MaxExtrapolationMs = 600;
+
+    /// <summary>Última posición REAL leída de VLC, y el instante en que la vimos cambiar.</summary>
+    private long _lastRealTimeMs = -1;
+
+    private long _lastRealTimeTick;
+
     private long _lastSeekTick;
 
     /// <summary>
@@ -509,6 +565,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         media.Dispose(); // libvlc se queda con su propia referencia.
 
         PositionMs = ms;
+        Reanchor(ms);
         _lastSeekTick = Environment.TickCount64;
         _seekCooldownMs = RelaunchCooldownMs;
         IsPlaying = true;
@@ -521,8 +578,22 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         var clamped = Math.Clamp(ms, 0, DurationMs > 0 ? DurationMs : ms);
         Player.Time = (long)clamped;
         PositionMs = clamped;
+        Reanchor(clamped);
         _lastSeekTick = Environment.TickCount64;
         _seekCooldownMs = ReseekCooldownMs;
+    }
+
+    /// <summary>
+    /// Reancla la estimación del playhead después de un salto deliberado (seek o relanzamiento).
+    ///
+    /// Sin esto, el primer Tick posterior al salto compara contra un ancla vieja: VLC todavía
+    /// puede devolver la posición ANTERIOR por un par de vueltas, y la estimación arrastraría el
+    /// playhead de vuelta al lugar del que acabamos de saltar.
+    /// </summary>
+    private void Reanchor(double ms)
+    {
+        _lastRealTimeMs = (long)ms;
+        _lastRealTimeTick = Environment.TickCount64;
     }
 
     /// <summary>
@@ -563,7 +634,27 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // clip), y desaparecía al mover B hacia adentro, porque ahí el playhead cruza B ANTES de
         // que VLC llegue a Ended.
         var time = player.Time;
-        if (time >= 0) PositionMs = time;
+        if (time >= 0)
+        {
+            // Cada lectura NUEVA reancla la estimación. La comparación es contra el último valor
+            // real y no contra PositionMs a propósito: PositionMs está extrapolado, así que casi
+            // nunca coincide con lo que devuelve VLC y el ancla no se movería nunca.
+            if (time != _lastRealTimeMs)
+            {
+                _lastRealTimeMs = time;
+                _lastRealTimeTick = Environment.TickCount64;
+            }
+
+            // Entre saltos de VLC el playhead lo lleva el reloj. Solo mientras REPRODUCE: en
+            // pausa el tiempo no corre, y estimar ahí haría que el playhead se fuera solo con el
+            // video quieto. Ver MaxExtrapolationMs.
+            var elapsed = player.IsPlaying
+                ? Math.Min(Environment.TickCount64 - _lastRealTimeTick, MaxExtrapolationMs)
+                : 0;
+
+            var estimated = _lastRealTimeMs + elapsed;
+            PositionMs = DurationMs > 0 ? Math.Min(estimated, DurationMs) : estimated;
+        }
         else if (ended && DurationMs > 0) PositionMs = DurationMs;
 
         IsPlaying = player.IsPlaying;
@@ -580,6 +671,20 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // igual funciona sobre el clip entero en vez de no hacer nada.
         var start = Math.Clamp(LoopStartMs, 0, DurationMs);
         var end = LoopEndMs > start ? Math.Min(LoopEndMs, DurationMs) : DurationMs;
+
+        // Se cierra la zona un poco antes del final REAL para que el loop sea un seek y no una
+        // reapertura del archivo (que es el intervalo negro). Ver TailGuardMs.
+        //
+        // ⚠ Es un Min, así que a un marker B puesto a mitad de clip NO lo toca: ahí
+        // `DurationMs - TailGuardMs` es más grande y gana el marker del usuario. Solo muerde
+        // cuando B está pegado al final, que es justo el caso de la zona por defecto.
+        //
+        // Las dos condiciones son guardas de cordura, no adorno:
+        //  - clips MUY cortos (un gif de medio segundo) no tienen 150ms para regalar;
+        //  - si el usuario puso A casi al final, recortar dejaría end <= start → "ya pasaste B"
+        //    daría verdadero en cada tick y el clip quedaría en una ráfaga de seeks.
+        var tail = DurationMs - TailGuardMs;
+        if (DurationMs > 1000 && tail > start + LoopGuardMs) end = Math.Min(end, tail);
 
         if (Environment.TickCount64 - _lastSeekTick < _seekCooldownMs) return;
 

@@ -340,11 +340,66 @@ La zona se **sanea en cada vuelta** en vez de confiar en los campos crudos: si `
 se inicializó o quedó fuera de rango por un board editado a mano, el loop igual corre sobre el clip
 entero en vez de no hacer nada.
 
+### ⚠ El INTERVALO NEGRO entre repeticiones — y por qué no era una config de VLC
+
+Reportado como *"con varios videos, entre repetición y repetición aparece un intervalo negro"*.
+Se buscó un flag de VLC para ajustar; **no existe**, porque la causa está en cuál de los dos
+caminos de vuelta al marker A tomaba el loop:
+
+| Camino | Cuándo | Qué hace VLC | Costo |
+|---|---|---|---|
+| `SeekTo` | el playhead cruza B a mitad de clip | mueve el input, que sigue ABIERTO | hipito de decenas de ms, la imagen NO se va |
+| `RestartFrom` | el clip llegó a `Ended` | `Stop()` + Media NUEVO + `Play()`: reabre el archivo, re-inicializa demuxer y codec, vuelve a llenar el caché | **cientos de ms EN NEGRO** |
+
+Con la zona por defecto (B = duración) caía SIEMPRE en la fila de abajo: el playhead nunca
+alcanzaba a cruzar B porque VLC cortaba el stream primero. O sea que el caso MÁS COMÚN de la app
+—soltar un clip y que loopee entero— era justo el que pagaba el reinicio caro. Con varios
+sectores empeora: si los clips duran parecido se sincronizan y reabren todos a la vez.
+
+El arreglo tiene DOS mitades, y la segunda es la que de verdad importa:
+
+**1. `TailGuardMs = 150`** — la zona efectiva se cierra 150ms antes del final real, así el
+playhead cruza B ANTES de que VLC llegue a `Ended` y el loop pasa a ser un seek. Es un `Min`, así
+que a un marker B puesto a mitad de clip NO lo toca: solo muerde cuando B está pegado al final.
+El precio es perder los últimos ~150ms; imperceptible al lado de medio segundo en negro.
+
+**2. ⚠ `player.Time` NO AVANZA CONTINUO — se actualiza A SALTOS.** Esto es lo que hacía que la
+mitad 1 sola fuera **una lotería**, y no se descubrió razonando sino MIDIENDO con `RestartProbe`:
+sobre un clip de 4s a 25fps el valor se queda quieto ~10 ticks y después salta **~324ms de una**.
+La resolución real de la posición es un orden de magnitud PEOR que el latido de 33ms. Si el
+último salto caía por debajo del umbral, el clip llegaba al final igual — con el guard puesto,
+el test fallaba 2 de cada 3 corridas.
+→ Fix: entre salto y salto `Tick()` estima la posición con el **reloj de pared** (`_lastRealTimeMs`
++ transcurrido), que es lo que hace la barra de progreso de cualquier reproductor. Bonus real: el
+playhead de la timeline dejó de moverse a los tirones.
+- Solo se estima **mientras reproduce**: en pausa el playhead se iría solo con el video quieto.
+- Techo `MaxExtrapolationMs = 600`: si VLC se cuelga (buffering, disco lento) la estimación no
+  puede correr sola para siempre.
+- `Reanchor()` en `SeekTo`/`RestartFrom`: tras un salto deliberado VLC devuelve la posición VIEJA
+  por un par de vueltas, y sin reanclar la estimación te arrastra de vuelta al punto del que
+  saltaste.
+
+`RestartFrom` **NO se eliminó**: sigue siendo la red por si un tick se pierde del todo. Es el
+camino excepcional ahora, no el normal.
+
+Regresión: `tools/test-restart.ps1`, caso 3. ⚠ **El discriminador es el ESTADO de VLC, no la
+posición** — y esto costó una vuelta: mirar "hasta dónde llegó el playhead" da OK **también contra
+el código roto**, porque `RestartFrom` pisa `PositionMs` con el marker A dentro de la MISMA vuelta
+del Tick y el pico nunca se muestrea. Hay que preguntar si el player pasó por `Ended`/`Stopped`, y
+**antes** de llamar a `Tick()` (que es quien lo atiende y devuelve el estado a `Playing` en el
+acto). Verificado en rojo por las dos mitades: sin extrapolación falla 2 de 3 corridas; con
+`TailGuardMs = 0` el margen cae a ~45ms y falla el piso de 100ms.
+
+⚠ Esto NO vuelve el loop invisible: el seek de VLC sigue sin ser frame-exact y queda el hipito de
+decenas de ms que este documento ya declara aceptable. Lo que se fue es el NEGRO. Un loop
+verdaderamente sin costura sigue exigiendo pre-decodificar la zona a RAM (anotado como v2).
+
 Dos constantes que NO son arbitrarias:
 - `LoopGuardMs = 40` — el polling es de 33ms; si esperáramos a superar B exacto nos pasaríamos de
   largo. Se dispara un poco antes.
 - `ReseekCooldownMs = 150` — sin enfriamiento, una zona más corta que la latencia del seek de VLC
   entra en ráfaga de saltos y el video queda congelado tartamudeando.
+- `TailGuardMs = 150` y `MaxExtrapolationMs = 600` — ver la sección del intervalo negro, arriba.
 
 ⚠ **El seek de VLC NO es frame-exact.** Hay un hipito de decenas de ms en el punto del loop. Es
 aceptable para referencia de estudio y es **una limitación del motor, no un bug a cazar**. Un loop
