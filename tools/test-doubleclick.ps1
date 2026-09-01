@@ -9,7 +9,12 @@
 #
 #   powershell -File tools/test-doubleclick.ps1
 #
-# Sale 0 si pasa, 1 si fallo.
+# ⚠ NECESITA UNA SESION INTERACTIVA Y DESBLOQUEADA. Manda clicks reales y usa el portapapeles;
+# las dos cosas viven en el escritorio interactivo. Con la pantalla bloqueada, en un servicio o
+# en una sesion sin escritorio, el portapapeles devuelve "acceso denegado" y no hay nada que
+# medir. Ese caso NO es una falla del producto y por eso tiene codigo propio.
+#
+# Sale 0 si pasa, 1 si fallo, 2 si NO SE PUDO MEDIR (sin acceso al escritorio).
 
 param([string]$Clip = '')
 
@@ -74,10 +79,23 @@ public static class Raton {
 }
 '@
 
+# ⚠ Se comprueba el ACCESO al portapapeles ANTES de levantar la app. Sin esto, la prueba abre
+# la ventana, manda los clicks y recien ahi revienta — y el error que salia mandaba a buscar una
+# app que estuviera "reteniendo" el portapapeles, que es una pista falsa: GetOpenClipboardWindow
+# devuelve 0 (nadie lo tiene). Lo que falta es el escritorio interactivo, no un turno.
+try { Set-Clipboard -Value 'ampz-sonda' }
+catch {
+    Write-Host 'NO SE PUDO MEDIR: no hay acceso al portapapeles.'
+    Write-Host 'Esta prueba necesita una sesion interactiva y DESBLOQUEADA (manda clicks reales).'
+    Write-Host 'No es una falla del producto: es que aca no hay escritorio contra el cual medir.'
+    exit 2
+}
+
 Get-Process -Name AmpzMediaBoard -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 400
 
 $proc = Start-Process $exe -ArgumentList "`"$board`"" -PassThru
+$salida = 1   # ⚠ pesimista por defecto: si el script REVIENTA a mitad, no puede reportar exito
 try {
     # Se espera a la ventana. ⚠ Si el titulo es 'Ampz MediaBoard' PELADO, eso es el caption de un
     # MessageBox y no la ventana: la app esta mostrando un error que nadie leyo.
@@ -102,12 +120,27 @@ try {
 
     $fallas = 0
 
+    # ⚠ El portapapeles de Windows es un recurso EXCLUSIVO y de un solo dueno: si cualquier otra
+    # app lo tiene abierto en ese instante, la llamada FALLA con CLIPBRD_E_CANT_OPEN. Es
+    # transitorio y no es culpa de nadie — la propia app lo documenta y se lo traga en silencio.
+    # Sin reintento, esta prueba se cae por algo que no tiene NADA que ver con lo que mide, y con
+    # $ErrorActionPreference='Stop' se cae ademas en el peor momento: a mitad de la medicion.
+    function ConPortapapeles([scriptblock]$accion) {
+        for ($i = 0; $i -lt 12; $i++) {
+            try { return & $accion } catch { Start-Sleep -Milliseconds 150 }
+        }
+        # ⚠ NO se dice "lo tiene otra app": eso seria adivinar, y ya paso que el mensaje
+        # mandara a buscar una contencion que no existia (GetOpenClipboardWindow devolvia 0,
+        # o sea que NADIE lo tenia abierto — era falta de ACCESO al escritorio).
+        throw 'SIN-PORTAPAPELES'
+    }
+
     function Probar([string]$que, [int]$cx, [int]$cy, [bool]$obligatorio) {
-        Set-Clipboard -Value 'NADA'
+        ConPortapapeles { Set-Clipboard -Value 'NADA' }
         Start-Sleep -Milliseconds 150
         [Raton]::DobleClick($script:o.X + $cx, $script:o.Y + $cy)
         Start-Sleep -Milliseconds 600
-        $pegado = Get-Clipboard -Raw
+        $pegado = ConPortapapeles { Get-Clipboard -Raw }
         if ($pegado) { $pegado = $pegado.Trim() }
         $ok = ($pegado -eq $script:Clip)
         if ($ok)            { Write-Host "  [OK ] $que -> copio el path" }
@@ -146,10 +179,11 @@ try {
 
 
     Write-Host ''
-    if ($fallas -eq 0) { Write-Host '=== TODO OK ==='; exit 0 }
-    Write-Host "=== $fallas FALLA(S) ==="; exit 1
+    if ($fallas -eq 0) { Write-Host '=== TODO OK ==='; $salida = 0 }
+    else { Write-Host "=== $fallas FALLA(S) ===" }
 }
 finally {
     Get-Process -Name AmpzMediaBoard -ErrorAction SilentlyContinue | Stop-Process -Force
     Remove-Item $board -ErrorAction SilentlyContinue
 }
+exit $salida
