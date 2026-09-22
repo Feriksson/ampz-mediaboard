@@ -9,6 +9,14 @@
     <!-- x64 fijo: libvlc.dll es nativa y viene solo para win-x64 en el paquete que usamos. -->
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
+    <!-- El paquete de VLC elige qué arquitecturas copiar mirando $(Platform), y `dotnet publish
+         -r win-x64` la deja en AnyCPU (<Platforms> solo LISTA las posibles, no elige una). Con
+         AnyCPU copia win-x86 y win-arm64 también: ~180 MB de binarios que una app x64 jamás
+         carga, inflando el publish y el instalador. Se fija acá, independiente de cómo se llame
+         al build. -->
+    <VlcWindowsX64Enabled>true</VlcWindowsX64Enabled>
+    <VlcWindowsX86Enabled>false</VlcWindowsX86Enabled>
+    <VlcWindowsArm64Enabled>false</VlcWindowsArm64Enabled>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>ampz-mediaboard.ico</ApplicationIcon>
     <AssemblyTitle>Ampz MediaBoard</AssemblyTitle>
