@@ -4,3 +4,4 @@ obj/
 *.user
 *.suo
 ampz-crash.log
+installer/Output/
