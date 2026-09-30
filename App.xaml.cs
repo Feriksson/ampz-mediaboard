@@ -33,7 +33,8 @@ public partial class App : Application
         base.OnStartup(e);
 
         // Doble click en un .mboard desde Explorer: el shell nos pasa el path como argumento.
-        var startupFile = BoardFile.FromCommandLine(e.Args);
+        // Con varios, cada uno abre en su pestaña.
+        var startupFiles = BoardFile.FromCommandLine(e.Args);
 
         // La extensión se registra sola la primera vez, para que el doble click funcione sin que
         // el usuario tenga que descubrir un botón. Solo se escribe si NO había asociación previa:
@@ -41,7 +42,7 @@ public partial class App : Application
         // Para repuntarla a este exe existe el botón "Asociar .mboard" de la barra.
         if (!BoardFile.IsRegistered()) BoardFile.Register();
 
-        new MainWindow(startupFile).Show();
+        new MainWindow(startupFiles).Show();
 
         // DESPUÉS del Show, a propósito: el precalentamiento de VLC es trabajo de fondo y no
         // tiene que demorar la primera pintada de la ventana. Ver VlcEngine.Warmup para el

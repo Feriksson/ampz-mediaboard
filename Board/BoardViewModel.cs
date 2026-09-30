@@ -207,7 +207,53 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     /// <summary>Termina el arrastre: descongela y devuelve a Play lo que estaba reproduciendo.</summary>
     public void EndInteractiveResize()
     {
+        // Si la pestaña se fue a segundo plano EN MEDIO del arrastre (Ctrl+Tab con el mouse
+        // apretado), el DragCompleted llega con el board suspendido. Descongelar acá haría
+        // arrancar clips en una pestaña que nadie ve; los deja congelados y Resume los devuelve
+        // al volver — con el _resumeAfterThaw que anotó el arrastre, que es el correcto.
+        if (IsSuspended) return;
         foreach (var sector in AllSectors) sector.Thaw();
+    }
+
+    /// <summary>
+    /// El board está en una pestaña de SEGUNDO PLANO: clips pausados y latido apagado.
+    /// Ver <see cref="Suspend"/>.
+    /// </summary>
+    public bool IsSuspended { get; private set; }
+
+    /// <summary>
+    /// Manda el board a segundo plano (su pestaña dejó de ser la activa).
+    ///
+    /// Es el MISMO congelado que el del arrastre de splitter (<see cref="SectorNode.Freeze"/>)
+    /// más el latido apagado:
+    /// - pausar corta la decodificación: una pestaña que no se ve no puede quemar CPU;
+    /// - el timer se DETIENE, no solo se saltea: con ocho pestañas serían ocho latidos de 30 Hz
+    ///   compitiendo en la cola del Dispatcher por nada — justo el jitter que el latido único
+    ///   existe para evitar (ver el comentario de la clase).
+    ///
+    /// ⚠ NO se reconstruye ni se libera nada. Los VideoView siguen vivos (colapsados, ver
+    /// BoardView.SetSuspended) y los MediaPlayer siguen enganchados a su HWND, así que volver a
+    /// la pestaña es despausar — sin Remount, sin reabrir archivos, sin frames negros.
+    /// </summary>
+    public void Suspend()
+    {
+        if (IsSuspended) return;
+        IsSuspended = true;
+        _tick.Stop();
+        foreach (var sector in AllSectors) sector.Freeze();
+    }
+
+    /// <summary>
+    /// Vuelve a primer plano. Reanuda SOLO lo que estaba reproduciendo al suspender (la misma
+    /// regla que el arrastre de splitter): un clip que pausaste a mano no arranca porque
+    /// cambiaste de pestaña.
+    /// </summary>
+    public void Resume()
+    {
+        if (!IsSuspended) return;
+        IsSuspended = false;
+        foreach (var sector in AllSectors) sector.Thaw();
+        _tick.Start();
     }
 
     /// <summary>Reemplaza el board entero (lo usa la carga desde disco).</summary>
@@ -221,6 +267,13 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
 
         Root = root;
         root.Parent = null;
+
+        // Un board suspendido que recibe un árbol nuevo lo recibe CONGELADO también: si no,
+        // Resume no tendría nada que descongelar y el estado del board diría "en segundo plano"
+        // con sectores que no lo saben.
+        if (IsSuspended)
+            foreach (var sector in SplitNode.Sectors(root)) sector.Freeze();
+
         Select(SplitNode.Sectors(root).First());
         LayoutChanged?.Invoke();
     }
@@ -233,6 +286,10 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         _tick.Stop();
+        // Un board liberado (pestaña cerrada) ya no tiene vista que reconstruir: soltar los
+        // suscriptores evita que la BoardView muerta quede colgada de este objeto.
+        LayoutChanged = null;
+        RatiosChanged = null;
         foreach (var sector in SplitNode.Sectors(Root))
             sector.Dispose();
     }

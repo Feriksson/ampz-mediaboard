@@ -7,8 +7,13 @@
         Background="{StaticResource WindowBrush}"
         UseLayoutRounding="True">
 
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+    </Window.Resources>
+
     <Grid>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
@@ -21,9 +26,9 @@
             <Grid>
                 <StackPanel Orientation="Horizontal">
                     <Button x:Name="NewButton" Content="Nuevo" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Ctrl+N — board vacío de un solo sector" />
+                            ToolTip="Ctrl+N — pestaña nueva con un board vacío" />
                     <Button x:Name="OpenButton" Content="Abrir board…" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Ctrl+O — abre un archivo .mboard" />
+                            ToolTip="Ctrl+O — abre un archivo .mboard en una pestaña" />
                     <Button x:Name="SaveButton" Content="Guardar" Style="{StaticResource ToolbarButton}"
                             ToolTip="Ctrl+S — guarda en el archivo .mboard actual" />
                     <Button x:Name="SaveAsButton" Content="Guardar como…" Style="{StaticResource ToolbarButton}"
@@ -49,7 +54,7 @@
                             Style="{StaticResource ToolbarButton}" Visibility="Collapsed"
                             ToolTip="Hace que los archivos .mboard se abran con esta app al doble click" />
                     <TextBlock Foreground="#5A5A6B" FontSize="10" VerticalAlignment="Center"
-                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead  ·  F11 = pantalla completa" />
+                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead  ·  Ctrl+T / Ctrl+W = pestañas  ·  F11 = pantalla completa" />
                     <Border Width="1" Background="#2E2E3A" Margin="12,1,10,1" />
                     <!-- El texto lo pone ShowVersion() leyendo el assembly. NO se escribe acá:
                          la única fuente de verdad es <Version> en el .csproj. -->
@@ -59,7 +64,88 @@
             </Grid>
         </Border>
 
-        <!-- Acá adentro se inyecta el BoardView, que materializa el árbol de layout. -->
-        <ContentControl x:Name="BoardHost" Grid.Row="1" Margin="4" />
+        <!-- ══ Tira de pestañas ══
+             Solo la TIRA: el contenido de las pestañas NO vive acá (ver BoardHost). Por eso es
+             un ItemsControl a mano y no un TabControl: el TabControl descarga el contenido de
+             las pestañas no seleccionadas, y eso destruiría los VideoView (bug #4).
+             Se esconde en pantalla completa junto con la barra superior. -->
+        <Border x:Name="TabStrip" Grid.Row="1" Background="#17171E" Padding="4,4,4,0">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Desborde: se DESPLAZA en horizontal (rueda del mouse), nunca parte en dos
+                     renglones ni empuja el board. La barra de scroll va oculta: la de WPF por
+                     defecto mide 17px de alto y es clara, más grande que la tira misma. -->
+                <ScrollViewer x:Name="TabScroller" HorizontalScrollBarVisibility="Hidden"
+                              VerticalScrollBarVisibility="Disabled" HorizontalAlignment="Left">
+                    <ItemsControl x:Name="TabList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Focusable=False: como en un navegador, clickear una pestaña
+                                     no se roba el foco — si no, el Espacio siguiente "apretaría"
+                                     la pestaña en vez de dar play. -->
+                                <Button Click="OnTabClick" MouseUp="OnTabMouseUp" Focusable="False"
+                                        Cursor="Hand" ToolTip="{Binding ToolTipText}"
+                                        AutomationProperties.AutomationId="BoardTab"
+                                        AutomationProperties.Name="{Binding Header}">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border x:Name="Bg" Background="#1F1F28" CornerRadius="4,4,0,0"
+                                                    Padding="10,0,4,0" Height="26" Margin="0,0,2,0"
+                                                    BorderThickness="0,2,0,0" BorderBrush="Transparent">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding Header}" MaxWidth="160"
+                                                               TextTrimming="CharacterEllipsis"
+                                                               VerticalAlignment="Center" FontSize="11"
+                                                               Foreground="{StaticResource DimTextBrush}"
+                                                               x:Name="Label" />
+                                                    <!-- Cambios sin guardar. Mismo símbolo que VS Code. -->
+                                                    <TextBlock Text="•" Margin="5,0,0,0" FontSize="13"
+                                                               VerticalAlignment="Center"
+                                                               Foreground="{StaticResource WarnBrush}"
+                                                               Visibility="{Binding IsModified, Converter={StaticResource BoolToVisibility}}" />
+                                                    <Button Content="×" Click="OnTabCloseClick" Focusable="False"
+                                                            Style="{StaticResource IconButton}" Margin="6,0,0,0"
+                                                            ToolTip="Cerrar pestaña (Ctrl+W)"
+                                                            AutomationProperties.Name="Cerrar pestaña" />
+                                                </StackPanel>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                    <Setter TargetName="Bg" Property="Background" Value="{StaticResource SectorBrush}" />
+                                                    <Setter TargetName="Bg" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                                                    <Setter TargetName="Label" Property="Foreground" Value="{StaticResource TextBrush}" />
+                                                </DataTrigger>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="Label" Property="Foreground" Value="{StaticResource TextBrush}" />
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+
+                <Button x:Name="NewTabButton" Grid.Column="1" Content="+" Style="{StaticResource IconButton}"
+                        Width="26" Height="24" FontSize="15" Focusable="False" VerticalAlignment="Top"
+                        ToolTip="Ctrl+T — pestaña nueva con un board vacío"
+                        AutomationProperties.Name="Pestaña nueva" />
+            </Grid>
+        </Border>
+
+        <!-- Acá viven las BoardView de TODAS las pestañas, apiladas. Se cambia de pestaña por
+             Visibility (ver BoardTab.Activate): las inactivas siguen vivas y colapsadas, así sus
+             clips no se re-montan al volver. -->
+        <Grid x:Name="BoardHost" Grid.Row="2" Margin="4" />
     </Grid>
 </Window>

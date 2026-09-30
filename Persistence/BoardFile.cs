@@ -89,13 +89,15 @@ public static class BoardFile
         }
     }
 
-    /// <summary>¿El argumento de línea de comandos es un board que existe? Lo usa el doble click.</summary>
-    public static string? FromCommandLine(string[] args)
-    {
-        var path = args.FirstOrDefault(a =>
-            !a.StartsWith('-') &&
-            Path.GetExtension(a).Equals(Extension, StringComparison.OrdinalIgnoreCase));
-
-        return path is not null && File.Exists(path) ? path : null;
-    }
+    /// <summary>
+    /// Los boards que llegaron por línea de comandos y existen, en orden. Lo usa el doble click
+    /// en Explorer (un solo path) y abrir varios a la vez (<c>AmpzMediaBoard.exe a.mboard b.mboard</c>):
+    /// cada uno va a su propia pestaña.
+    /// </summary>
+    public static IReadOnlyList<string> FromCommandLine(string[] args) =>
+        args.Where(a =>
+                !a.StartsWith('-') &&
+                Path.GetExtension(a).Equals(Extension, StringComparison.OrdinalIgnoreCase) &&
+                File.Exists(a))
+            .ToList();
 }

@@ -72,18 +72,29 @@ public static class BoardStore
     /// como "modificado" sin que nadie haya tocado nada — y el usuario aprendería a ignorar el
     /// aviso, que es la peor forma de romper una advertencia.
     /// </summary>
-    public static bool MatchesFile(string path, LayoutNode root)
+    public static bool MatchesFile(string path, LayoutNode root) =>
+        ReadNormalized(path) is not { } saved ||
+        string.Equals(Serialize(root), saved, StringComparison.Ordinal);
+
+    /// <summary>
+    /// El contenido del archivo normalizado (deserializado y vuelto a serializar con las mismas
+    /// opciones que <see cref="Serialize"/>), o null si no se pudo leer.
+    ///
+    /// Existe aparte de <see cref="MatchesFile"/> para que la marca "•" de cambios sin guardar
+    /// de las pestañas pueda comparar contra una foto EN MEMORIA tomada al abrir/guardar, en vez
+    /// de leer el disco cada medio segundo. Es la MISMA comparación: misma normalización, mismo
+    /// resultado — solo cambia cuándo se lee el archivo.
+    /// </summary>
+    public static string? ReadNormalized(string path)
     {
         try
         {
             var dto = JsonSerializer.Deserialize<NodeDto>(File.ReadAllText(path), Options);
-            if (dto is null) return true;
-
-            return string.Equals(Serialize(root), JsonSerializer.Serialize(dto, Options), StringComparison.Ordinal);
+            return dto is null ? null : JsonSerializer.Serialize(dto, Options);
         }
         catch
         {
-            return true;
+            return null;
         }
     }
 

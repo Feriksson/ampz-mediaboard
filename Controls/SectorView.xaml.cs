@@ -79,6 +79,11 @@ public partial class SectorView : UserControl
         // existiera).
         Video.Loaded += (_, _) => StartWhenSurfaceReady();
 
+        // Y también cuando la superficie se VUELVE visible: un board abierto en una pestaña de
+        // segundo plano (o un sector congelado por un arrastre) tiene sus clips pendientes
+        // esperando justo este momento. Ver StartWhenSurfaceReady.
+        Video.IsVisibleChanged += (_, e) => { if ((bool)e.NewValue) StartWhenSurfaceReady(); };
+
         // La cabecera ARMA el arrastre, pero el movimiento se escucha en el SECTOR ENTERO.
         // ⚠ No es un detalle: WPF no captura el mouse al apretar, así que los eventos de
         // movimiento solo llegan al elemento que está DEBAJO del cursor. La cabecera mide ~24px
@@ -443,17 +448,25 @@ public partial class SectorView : UserControl
     /// VideoView en Visible, y su ventana nativa se posiciona durante el layout. Arrancar el
     /// Play() en la misma vuelta lo agarraría con tamaño cero. Una vuelta después del layout,
     /// la superficie ya está donde tiene que estar.
+    ///
+    /// ⚠ "Cargada" NO alcanza: hace falta que esté VISIBLE. Una pestaña de segundo plano tiene
+    /// su BoardView colapsada, y sus VideoView pueden estar cargados igual — arrancar ahí es
+    /// darle a VLC una ventana escondida y de tamaño cero, y de paso poner a decodificar una
+    /// pestaña que nadie mira. Se espera al IsVisibleChanged de cuando la pestaña se activa
+    /// (enganchado en el constructor). Mismo invariante que el bug #1: Play() solo con una
+    /// superficie de verdad.
     /// </summary>
     private void StartWhenSurfaceReady()
     {
-        if (_node?.Player is null || !Video.IsLoaded) return;
+        if (_node?.Player is null || !Video.IsLoaded || !Video.IsVisible) return;
 
         var node = _node;
         Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
         {
             // El sector pudo haber cambiado de contenido mientras esperábamos la vuelta del
-            // Dispatcher (otro drop encima, o un cierre). Si ya no es el mismo nodo, no tocamos nada.
-            if (ReferenceEquals(_node, node)) node.StartPending();
+            // Dispatcher (otro drop encima, o un cierre), o la pestaña pudo volver a segundo
+            // plano. En cualquiera de los dos casos, no tocamos nada.
+            if (ReferenceEquals(_node, node) && Video.IsVisible) node.StartPending();
         });
     }
 

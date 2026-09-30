@@ -88,6 +88,17 @@ public static class VlcEngine
         thread.Start();
     }
 
+    /// <summary>
+    /// Crea un Media para <paramref name="path"/>. TODA apertura de archivo de la app pasa por
+    /// acá (carga, re-montaje, relanzamiento del loop), y eso es lo que la hace MEDIBLE: cada
+    /// una deja una línea en el <see cref="DiagLog"/> (apagado salvo en las pruebas).
+    /// </summary>
+    public static LibVLCSharp.Shared.Media NewMedia(string path)
+    {
+        DiagLog.Write($"open {path}");
+        return new LibVLCSharp.Shared.Media(Instance, new Uri(path));
+    }
+
     private static LibVLC Create()
     {
         // Core.Initialize() localiza libvlc.dll + el directorio de plugins. El paquete

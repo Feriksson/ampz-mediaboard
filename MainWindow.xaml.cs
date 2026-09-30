@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Input;
@@ -11,25 +13,51 @@ namespace AmpzMediaBoard;
 
 public partial class MainWindow : Window
 {
-    private readonly BoardViewModel _board = new();
+    /// <summary>
+    /// Las pestañas abiertas, en el orden de la tira. SIEMPRE hay al menos una: cerrar la última
+    /// deja una vacía, igual que cerrar el último sector lo vacía en vez de eliminarlo — la
+    /// ventana nunca queda sin board.
+    /// </summary>
+    private readonly ObservableCollection<BoardTab> _tabs = [];
 
-    /// <summary>Archivo `.mboard` abierto, o null si el board todavía no se guardó en ninguno.</summary>
-    private string? _currentFile;
+    /// <summary>La pestaña visible. Todos los atajos y botones de la barra actúan sobre ella.</summary>
+    private BoardTab _active = null!;
 
-    /// <param name="startupFile">
-    /// Board a abrir al arrancar. Viene del doble click en Explorer (el shell nos pasa el path
-    /// como argumento). Si es null, la app arranca con un board VACÍO.
+    private BoardViewModel Board => _active.Board;
+
+    /// <summary>
+    /// Refresca la marca "•" de la pestaña activa. Por polling y no por eventos por la misma
+    /// razón por la que el aviso de cierre no usa un flag "dirty" (ver BoardStore): observar cada
+    /// mutación posible es garantía de que alguna se escapa. Serializar un board de 8 sectores
+    /// cada medio segundo cuesta microsegundos. Solo la ACTIVA: las demás están suspendidas y
+    /// no pueden cambiar.
+    /// </summary>
+    private readonly DispatcherTimer _modifiedRefresh;
+
+    /// <param name="startupFiles">
+    /// Boards a abrir al arrancar, cada uno en su pestaña; el primero queda visible. Vienen del
+    /// doble click en Explorer (el shell nos pasa el path como argumento). Si no hay ninguno, la
+    /// app arranca con un board VACÍO.
     ///
     /// ⚠ NO se restaura ninguna sesión anterior, y es deliberado. Ver la sección
     /// "Arranque limpio" del CLAUDE.md antes de agregar nada parecido.
     /// </param>
-    public MainWindow(string? startupFile = null)
+    public MainWindow(IReadOnlyList<string>? startupFiles = null)
     {
         InitializeComponent();
 
-        if (startupFile is not null) OpenFile(startupFile);
+        TabList.ItemsSource = _tabs;
+        SwitchTo(AddTab());
 
-        BoardHost.Content = new BoardView(_board);
+        // El primero llena la pestaña inicial (está en blanco, OpenPath la reutiliza); el resto
+        // abre en segundo plano, con sus clips esperando a que se muestre su pestaña.
+        var first = true;
+        foreach (var path in startupFiles ?? [])
+        {
+            OpenPath(path, activate: first);
+            first = false;
+        }
+
         ShowVersion();
         UpdateTitle();
 
@@ -37,12 +65,25 @@ public partial class MainWindow : Window
         // vida no merece ocupar espacio permanente en la barra.
         AssociateButton.Visibility = BoardFile.IsRegistered() ? Visibility.Collapsed : Visibility.Visible;
 
-        NewButton.Click += (_, _) => NewBoard();
+        NewButton.Click += (_, _) => NewTab();
+        NewTabButton.Click += (_, _) => NewTab();
         OpenButton.Click += (_, _) => OpenWithDialog();
-        SaveButton.Click += (_, _) => Save();
-        SaveAsButton.Click += (_, _) => _ = SaveAs();
-        DistributeButton.Click += (_, _) => _board.Distribute();
+        SaveButton.Click += (_, _) => Save(_active);
+        SaveAsButton.Click += (_, _) => _ = SaveAs(_active);
+        DistributeButton.Click += (_, _) => Board.Distribute();
         AssociateButton.Click += (_, _) => Associate();
+
+        // La tira desborda desplazándose: la rueda del mouse la mueve en horizontal (la barra
+        // de scroll está oculta, ver el XAML).
+        TabScroller.PreviewMouseWheel += (_, e) =>
+        {
+            TabScroller.ScrollToHorizontalOffset(TabScroller.HorizontalOffset - e.Delta);
+            e.Handled = true;
+        };
+
+        _modifiedRefresh = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(500) };
+        _modifiedRefresh.Tick += (_, _) => _active.RefreshModified();
+        _modifiedRefresh.Start();
 
         // PreviewKeyDown y no KeyDown: si el foco quedó en un botón, el KeyDown de Espacio lo
         // consume el botón (lo interpreta como "apretarme") y el atajo nunca llega acá.
@@ -51,18 +92,149 @@ public partial class MainWindow : Window
         Closing += OnClosing;
     }
 
+    #region Pestañas
+
+    /// <summary>
+    /// Crea una pestaña con un board vacío, en SEGUNDO PLANO. Quien la quiera visible llama a
+    /// <see cref="SwitchTo"/>. Nacer suspendida no es un detalle: si se le carga un board antes
+    /// de mostrarla (abrir varios por línea de comandos), sus clips quedan pendientes hasta que
+    /// la pestaña tenga una superficie visible donde dibujar.
+    /// </summary>
+    private BoardTab AddTab()
+    {
+        var tab = new BoardTab();
+        tab.Deactivate();
+        tab.PropertyChanged += OnTabPropertyChanged;
+        _tabs.Add(tab);
+        BoardHost.Children.Add(tab.View);
+        return tab;
+    }
+
+    private void NewTab() => SwitchTo(AddTab());
+
+    /// <summary>
+    /// Cambia de pestaña. Tiene que sentirse INSTANTÁNEO, y lo es porque no reconstruye nada:
+    /// la saliente se pausa y se colapsa, la entrante se hace visible y reanuda lo que estaba
+    /// reproduciendo. Ningún archivo se reabre. Ver BoardTab.Activate/Deactivate.
+    /// </summary>
+    private void SwitchTo(BoardTab tab)
+    {
+        if (ReferenceEquals(_active, tab)) return;
+
+        var clock = DiagLog.Enabled ? System.Diagnostics.Stopwatch.StartNew() : null;
+
+        // La saliente PRIMERO: así nunca hay dos pestañas decodificando a la vez, ni siquiera
+        // durante el cambio.
+        var previous = _active;
+        _active = tab;
+        if (previous is not null)
+        {
+            previous.RefreshModified();
+            previous.Deactivate();
+        }
+
+        tab.Activate();
+        tab.RefreshModified();
+        UpdateTitle();
+
+        // Con la tira desbordada, la pestaña activa puede estar fuera de la vista (Ctrl+Tab
+        // hacia una del final). Se trae a la vista después del layout, cuando ya tiene posición.
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            (TabList.ItemContainerGenerator.ContainerFromItem(tab) as FrameworkElement)?.BringIntoView();
+
+            // Prioridad Loaded corre DESPUÉS de las de Render: para acá el layout de la pestaña
+            // nueva ya se hizo. Es el costo del cambio tal como lo paga el hilo de UI. Ver DiagLog.
+            if (clock is not null) DiagLog.Write($"switch {clock.ElapsedMilliseconds}");
+        });
+    }
+
+    /// <summary>
+    /// Cierra una pestaña, con el aviso de cambios sin guardar de ESA pestaña. Si era la última,
+    /// queda una vacía en su lugar.
+    /// </summary>
+    private void CloseTab(BoardTab tab)
+    {
+        if (!ConfirmDiscardChanges(tab)) return;
+
+        if (_tabs.Count == 1)
+        {
+            NewTab();
+        }
+        else if (ReferenceEquals(tab, _active))
+        {
+            // La de la derecha, o la de la izquierda si era la última: como un navegador.
+            var i = _tabs.IndexOf(tab);
+            SwitchTo(_tabs[i + 1 < _tabs.Count ? i + 1 : i - 1]);
+        }
+
+        _tabs.Remove(tab);
+        tab.PropertyChanged -= OnTabPropertyChanged;
+
+        // Liberar ANTES de sacar la vista del árbol: el board desengancha cada player de su
+        // VideoView y los detiene en paralelo (VlcEngine.Release); recién después se destruyen
+        // las ventanas nativas. Mismo orden que ReplaceRoot → Rebuild.
+        tab.Dispose();
+        BoardHost.Children.Remove(tab.View);
+    }
+
+    private void CycleTab(int step)
+    {
+        var i = _tabs.IndexOf(_active);
+        SwitchTo(_tabs[((i + step) % _tabs.Count + _tabs.Count) % _tabs.Count]);
+    }
+
+    /// <summary>Ctrl+1..8 van a esa pestaña; Ctrl+9 a la ÚLTIMA, como en cualquier navegador.</summary>
+    private void JumpToTab(int number)
+    {
+        if (number == 9) SwitchTo(_tabs[^1]);
+        else if (number <= _tabs.Count) SwitchTo(_tabs[number - 1]);
+    }
+
+    private void OnTabPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (ReferenceEquals(sender, _active) && e.PropertyName == nameof(BoardTab.WindowTitle)) UpdateTitle();
+    }
+
+    private void OnTabClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is BoardTab tab) SwitchTo(tab);
+    }
+
+    private void OnTabCloseClick(object sender, RoutedEventArgs e)
+    {
+        // Handled: el Click del × BURBUJEA hasta el botón de la pestaña, que lo tomaría como
+        // "activar" una pestaña que acabamos de cerrar.
+        e.Handled = true;
+        if ((sender as FrameworkElement)?.DataContext is BoardTab tab) CloseTab(tab);
+    }
+
+    /// <summary>Click del medio sobre una pestaña = cerrarla, como en cualquier navegador.</summary>
+    private void OnTabMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Middle) return;
+        e.Handled = true;
+        if ((sender as FrameworkElement)?.DataContext is BoardTab tab) CloseTab(tab);
+    }
+
+    #endregion
+
     /// <summary>
     /// Segunda pasada del cierre: los reproductores ya se detuvieron (o se venció la espera) y
     /// la ventana se puede cerrar de verdad. Ver <see cref="BeginFastClose"/>.
     /// </summary>
     private bool _playersReleased;
 
-    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    private void OnClosing(object? sender, CancelEventArgs e)
     {
         if (_playersReleased) return;
 
-        if (!ConfirmDiscardChanges())
+        // Se pregunta por CADA pestaña con cambios (ConfirmDiscardChanges la trae al frente
+        // antes de preguntar, para que se vea de qué board se habla). Cancelar en cualquiera
+        // aborta el cierre entero: el usuario dijo que no quería irse.
+        foreach (var tab in _tabs.ToList())
         {
+            if (ConfirmDiscardChanges(tab)) continue;
             e.Cancel = true;
             return;
         }
@@ -86,6 +258,10 @@ public partial class MainWindow : Window
     /// el hilo de UI, con la ventana visible y congelada. Ahora el Stop corre en otros hilos
     /// (VlcEngine.Release) y el que mira solo ve la ventana irse.
     ///
+    /// Con pestañas es el MISMO camino, estirado: se sueltan los boards de TODAS, y todos sus
+    /// players se detienen en paralelo — el cierre sigue costando lo del Stop más lento, no la
+    /// suma de todas las pestañas.
+    ///
     /// ⚠ Se ESCONDE y no se cierra hasta que terminaron los Stop. No es cosmético: cerrar
     /// destruye los HWND de los VideoView, y un vout de VLC que todavía no se detuvo quedaría
     /// dibujando sobre una ventana hija de una ventana muerta. Escondida, la ventana nativa
@@ -100,7 +276,8 @@ public partial class MainWindow : Window
         try
         {
             Hide();
-            _board.Dispose();
+            _modifiedRefresh.Stop();
+            foreach (var tab in _tabs) tab.Board.Dispose();
             await Task.WhenAny(VlcEngine.WhenReleased(), Task.Delay(VlcEngine.ReleaseTimeout));
         }
         finally
@@ -113,69 +290,60 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Pregunta antes de perder trabajo. Devuelve false si el usuario decidió NO cerrar.
-    ///
-    /// Cubre los DOS casos, y cubrir el segundo es lo que hace seguro no tener sesión:
-    ///  · board con archivo → se compara contra el archivo y se avisa si difiere;
-    ///  · board SIN archivo → si tiene algo adentro, se avisa que nunca se guardó.
-    ///
-    /// Sin el segundo caso, sacar la restauración de sesión habría cambiado "te restaura cosas
-    /// que no pediste" por "te pierde cosas sin avisar", que es estrictamente peor.
+    /// ¿Cerrar esta pestaña perdería trabajo?
+    ///  · board con archivo → se compara contra el archivo;
+    ///  · board SIN archivo → si tiene algo adentro, nunca se guardó.
+    /// Un board vacío sin archivo no tiene nada que perder: preguntar ahí sería puro ruido, y un
+    /// aviso que salta cuando no hace falta es un aviso que el usuario aprende a ignorar.
     /// </summary>
-    private bool ConfirmDiscardChanges()
-    {
-        if (_currentFile is null)
-        {
-            // Un board vacío no tiene nada que perder: preguntar sería puro ruido, y un aviso
-            // que salta cuando no hace falta es un aviso que el usuario aprende a ignorar.
-            if (IsBoardEmpty()) return true;
+    private static bool HasUnsavedWork(BoardTab tab) =>
+        tab.FilePath is null ? !tab.IsEmpty : !BoardStore.MatchesFile(tab.FilePath, tab.Board.Root);
 
+    /// <summary>
+    /// Pregunta antes de perder trabajo de UNA pestaña. Devuelve false si el usuario decidió NO
+    /// cerrar.
+    ///
+    /// Cubre los DOS casos (con y sin archivo), y cubrir el segundo es lo que hace seguro no
+    /// tener sesión: sin él, sacar la restauración de sesión habría cambiado "te restaura cosas
+    /// que no pediste" por "te pierde cosas sin avisar", que es estrictamente peor.
+    ///
+    /// Si hay que preguntar, la pestaña se trae al frente ANTES: con varias abiertas, un
+    /// "¿guardar los cambios?" sobre un board que no estás viendo es una pregunta a ciegas.
+    /// </summary>
+    private bool ConfirmDiscardChanges(BoardTab tab)
+    {
+        if (!HasUnsavedWork(tab)) return true;
+
+        SwitchTo(tab);
+
+        if (tab.FilePath is not { } file)
+        {
             return MessageBox.Show(
                 "Este board no está guardado en ningún archivo.\n\n¿Guardarlo antes de cerrar?",
                 "Ampz MediaBoard", MessageBoxButton.YesNoCancel, MessageBoxImage.Question) switch
             {
-                MessageBoxResult.Yes => SaveAs(),
+                MessageBoxResult.Yes => SaveAs(tab),
                 MessageBoxResult.No => true,
                 _ => false,
             };
         }
 
-        if (BoardStore.MatchesFile(_currentFile, _board.Root)) return true;
-
         return MessageBox.Show(
-            $"El board \"{Path.GetFileNameWithoutExtension(_currentFile)}\" tiene cambios sin guardar.\n\n¿Guardarlos antes de cerrar?",
+            $"El board \"{Path.GetFileNameWithoutExtension(file)}\" tiene cambios sin guardar.\n\n¿Guardarlos antes de cerrar?",
             "Ampz MediaBoard", MessageBoxButton.YesNoCancel, MessageBoxImage.Question) switch
         {
-            MessageBoxResult.Yes => BoardStore.SaveTo(_currentFile, _board.Root) is null,
+            MessageBoxResult.Yes => Write(tab, file),
             MessageBoxResult.No => true,
             _ => false, // Cancelar: se queda abierto.
         };
     }
 
-    /// <summary>
-    /// Board recién nacido: un solo sector, sin nada adentro. Si el usuario partió la pantalla
-    /// o cargó un clip, eso YA es trabajo y merece el aviso.
-    /// </summary>
-    private bool IsBoardEmpty() =>
-        _board.Root is SectorNode { Kind: Media.MediaKind.None, MissingPath: null };
-
     #region Archivos de board
-
-    private void NewBoard()
-    {
-        // Mismo guard que al cerrar: sin sesión de respaldo, descartar el board actual sin
-        // avisar sería perder trabajo en silencio. Vale para "Nuevo" y para "Abrir".
-        if (!ConfirmDiscardChanges()) return;
-
-        _board.ReplaceRoot(new SectorNode());
-        _currentFile = null;
-        UpdateTitle();
-    }
 
     private void OpenWithDialog()
     {
-        if (!ConfirmDiscardChanges()) return;
-
+        // Sin aviso de cambios sin guardar: "Abrir" ya no reemplaza el board actual, abre en
+        // una pestaña. No hay nada que se pierda.
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
             Title = "Abrir board",
@@ -184,11 +352,28 @@ public partial class MainWindow : Window
             CheckFileExists = true,
         };
 
-        if (dialog.ShowDialog() == true) OpenFile(dialog.FileName);
+        if (dialog.ShowDialog() == true) OpenPath(dialog.FileName);
     }
 
-    private void OpenFile(string path)
+    /// <summary>
+    /// Abre un board en una pestaña, con dos excepciones que evitan pestañas de más:
+    ///  · si ese archivo YA está abierto, va a su pestaña (dos pestañas del mismo archivo se
+    ///    pisarían al guardar);
+    ///  · si la activa está en blanco (sin archivo y vacía), la reutiliza.
+    /// </summary>
+    private void OpenPath(string path, bool activate = true)
     {
+        var full = Path.GetFullPath(path);
+        var existing = _tabs.FirstOrDefault(t =>
+            t.FilePath is { } f && string.Equals(Path.GetFullPath(f), full, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+        {
+            if (activate) SwitchTo(existing);
+            return;
+        }
+
+        // Se lee ANTES de elegir pestaña: si el archivo está corrupto no queda una pestaña
+        // vacía creada de más.
         var root = BoardStore.LoadFrom(path);
         if (root is null)
         {
@@ -198,20 +383,21 @@ public partial class MainWindow : Window
             return;
         }
 
-        _board.ReplaceRoot(root);
-        _currentFile = path;
+        var target = _active.IsBlank ? _active : AddTab();
+        target.Open(root, full);
+        if (activate) SwitchTo(target);
         UpdateTitle();
     }
 
     /// <summary>
-    /// Guarda en el archivo actual; si todavía no hay ninguno, se comporta como "Guardar como".
-    /// Devuelve true si el board quedó guardado — el aviso de cierre depende de ese dato para
-    /// saber si puede dejar cerrar la ventana.
+    /// Guarda en el archivo de la pestaña; si todavía no hay ninguno, se comporta como "Guardar
+    /// como". Devuelve true si el board quedó guardado — el aviso de cierre depende de ese dato
+    /// para saber si puede dejar cerrar.
     /// </summary>
-    private bool Save() => _currentFile is null ? SaveAs() : Write(_currentFile);
+    private bool Save(BoardTab tab) => tab.FilePath is null ? SaveAs(tab) : Write(tab, tab.FilePath);
 
     /// <summary>Devuelve false si el usuario canceló el diálogo o si el guardado falló.</summary>
-    private bool SaveAs()
+    private bool SaveAs(BoardTab tab)
     {
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
@@ -219,19 +405,19 @@ public partial class MainWindow : Window
             Filter = BoardFile.DialogFilter,
             DefaultExt = BoardFile.Extension,
             AddExtension = true,
-            FileName = _currentFile is not null
-                ? Path.GetFileName(_currentFile)
+            FileName = tab.FilePath is not null
+                ? Path.GetFileName(tab.FilePath)
                 : "board" + BoardFile.Extension,
         };
 
         if (dialog.ShowDialog() != true) return false;
 
-        return Write(BoardFile.EnsureExtension(dialog.FileName));
+        return Write(tab, BoardFile.EnsureExtension(dialog.FileName));
     }
 
-    private bool Write(string path)
+    private bool Write(BoardTab tab, string path)
     {
-        var error = BoardStore.SaveTo(path, _board.Root);
+        var error = BoardStore.SaveTo(path, tab.Board.Root);
         if (error is not null)
         {
             // Un "guardar" que falla en silencio es la peor mentira que le podés decir al usuario:
@@ -241,7 +427,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        _currentFile = path;
+        tab.MarkSaved(path);
         UpdateTitle();
         return true;
     }
@@ -273,7 +459,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void PasteMediaPath()
     {
-        if (_board.Selected is not { } sector) return;
+        if (Board.Selected is not { } sector) return;
 
         string? path = null;
         try
@@ -317,7 +503,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// El título dice SIEMPRE sobre qué archivo estás trabajando — o que todavía no hay ninguno.
+    /// El título es el de la pestaña ACTIVA y dice SIEMPRE sobre qué archivo estás trabajando —
+    /// o que todavía no hay ninguno. El formato lo arma <see cref="BoardTab.WindowTitle"/>:
     ///
     /// ⚠ El nombre del board va PRIMERO y la app se abrevia a "AMB". No es capricho estético:
     /// el botón de la barra de tareas de Windows trunca por la DERECHA y da lugar a unos pocos
@@ -327,10 +514,7 @@ public partial class MainWindow : Window
     /// multi-instancia a propósito). Lo que identifica va primero; la marca, al final, donde
     /// puede perderse sin costo.
     /// </summary>
-    private void UpdateTitle() =>
-        Title = _currentFile is null
-            ? "Board sin guardar — AMB"
-            : $"{Path.GetFileNameWithoutExtension(_currentFile)} — AMB";
+    private void UpdateTitle() => Title = _active.WindowTitle;
 
     #endregion
 
@@ -397,7 +581,9 @@ public partial class MainWindow : Window
         ResizeMode = ResizeMode.NoResize;
         WindowState = WindowState.Maximized;
 
+        // La tira de pestañas se va con la barra: pantalla completa es el BOARD, nada más.
         TopBar.Visibility = Visibility.Collapsed;
+        TabStrip.Visibility = Visibility.Collapsed;
         _pantallaCompleta = true;
     }
 
@@ -413,6 +599,7 @@ public partial class MainWindow : Window
         WindowState = _stateAntesDePantallaCompleta;
 
         TopBar.Visibility = Visibility.Visible;
+        TabStrip.Visibility = Visibility.Visible;
         _pantallaCompleta = false;
     }
 
@@ -422,24 +609,46 @@ public partial class MainWindow : Window
     {
         if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
         {
+            var shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
             switch (e.Key)
             {
-                case Key.S when Keyboard.Modifiers.HasFlag(ModifierKeys.Shift):
-                    SaveAs();
+                case Key.S when shift:
+                    SaveAs(_active);
                     e.Handled = true;
                     return;
                 case Key.S:
-                    Save();
+                    Save(_active);
                     e.Handled = true;
                     return;
                 case Key.O:
                     OpenWithDialog();
                     e.Handled = true;
                     return;
+
+                // "Nuevo" ya no pisa el board actual: abre una pestaña. Ctrl+T es el mismo gesto
+                // con el atajo de cualquier navegador.
                 case Key.N:
-                    NewBoard();
+                case Key.T:
+                    NewTab();
                     e.Handled = true;
                     return;
+                case Key.W:
+                    CloseTab(_active);
+                    e.Handled = true;
+                    return;
+                case Key.Tab:
+                    CycleTab(shift ? -1 : 1);
+                    e.Handled = true;
+                    return;
+                case >= Key.D1 and <= Key.D9:
+                    JumpToTab(e.Key - Key.D0);
+                    e.Handled = true;
+                    return;
+                case >= Key.NumPad1 and <= Key.NumPad9:
+                    JumpToTab(e.Key - Key.NumPad0);
+                    e.Handled = true;
+                    return;
+
                 case Key.V:
                     PasteMediaPath();
                     e.Handled = true;
@@ -449,7 +658,7 @@ public partial class MainWindow : Window
                 // seleccionado" que está más abajo: es una acción sobre el board ENTERO, y un
                 // board recién abierto puede no tener ninguna celda activa.
                 case Key.E:
-                    _board.Distribute();
+                    Board.Distribute();
                     e.Handled = true;
                     return;
             }
@@ -474,7 +683,7 @@ public partial class MainWindow : Window
                 return;
         }
 
-        if (_board.Selected is not { } sector) return;
+        if (Board.Selected is not { } sector) return;
 
         switch (e.Key)
         {

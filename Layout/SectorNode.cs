@@ -214,7 +214,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // guardado, porque ahí el Load() corre antes de que exista el VideoView.
         // El Play() lo dispara la vista vía StartPending(), ya con la superficie enganchada.
         var player = new MediaPlayer(VlcEngine.Instance) { EnableMouseInput = false, EnableKeyInput = false };
-        _pending = new LibVLCSharp.Shared.Media(VlcEngine.Instance, new Uri(path));
+        _pending = VlcEngine.NewMedia(path);
 
         if (startAtMs > 0)
         {
@@ -521,7 +521,11 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         IsFrozen = true;
         _resumeAfterThaw = false;
 
-        if (Player is { } player && player.IsPlaying)
+        // ⚠ Se mira TAMBIÉN nuestro IsPlaying, no solo el de VLC. Un clip recién arrancado pasa
+        // unos cientos de ms en Opening/Buffering, y ahí player.IsPlaying todavía es false: sin
+        // esta segunda condición, cambiar de pestaña justo después de abrir un board dejaba ese
+        // clip decodificando en una pestaña que no se ve (y sin anotarlo para reanudar).
+        if (Player is { } player && _pending is null && (player.IsPlaying || IsPlaying))
         {
             player.SetPause(true);
             _resumeAfterThaw = true;
@@ -546,6 +550,12 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
         _lastSeekTick = Environment.TickCount64;
         _seekCooldownMs = ReseekCooldownMs;
+
+        // ⚠ Se reancla la estimación del playhead al valor REAL de VLC. El ancla de antes del
+        // congelado tiene un TickCount viejo (segundos, o minutos si la pestaña estuvo en segundo
+        // plano), así que el primer Tick le sumaría el techo de extrapolación entero: un salto
+        // de hasta 600ms inventado que, cerca del marker B, dispara un loop que nadie pidió.
+        if (Player is { } p && p.Time is var t and >= 0) Reanchor(t);
     }
 
     /// <summary>
@@ -568,7 +578,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     {
         if (Player is null || MediaPath is not { } path) return;
 
-        var media = new LibVLCSharp.Shared.Media(VlcEngine.Instance, new Uri(path));
+        var media = VlcEngine.NewMedia(path);
         if (ms > 0)
         {
             // InvariantCulture obligatorio: ver Load(). ":start-time=12,4" para VLC es basura.
