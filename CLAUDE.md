@@ -635,7 +635,7 @@ el cambio se detecta por la línea `switch` nueva del `DiagLog`. ⚠ El "•" se
 
 ### Panel fijado: sectores a la vista en TODAS las pestañas (`Board/PinnedDock.cs`)
 
-El 📌 de la cabecera de un sector lo manda al **panel fijado**, a la derecha del área de boards,
+El 📌 de la cabecera de un sector lo manda al **panel fijado**, a la IZQUIERDA del área de boards (se movió de la derecha a pedido del usuario),
 con un divisor para cambiarle el ancho. En un sector del panel el mismo 📌 aparece **apretado** y
 lo **desfija**. Diseño aprobado por el usuario (2026-09-30).
 

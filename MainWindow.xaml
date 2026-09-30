@@ -199,7 +199,10 @@
             </Grid>
         </Border>
 
-        <!-- ══ Área de boards: pestañas | divisor | panel fijado ══
+        <!-- ══ Área de boards: panel fijado | divisor | pestañas ══
+             El panel va a la IZQUIERDA por pedido del usuario. El código lee las columnas por
+             NOMBRE (TabsColumn/DockColumn), nunca por índice, y el ancho guardado es una
+             proporción: cambiar de lado es solo reordenar las columnas acá.
              ⚠ El panel fijado (DockHost) es HERMANO de BoardHost, NUNCA hijo. Cada video es una
              ventana nativa que no puede cambiar de padre sin re-montarse (bug #4): dentro del
              contenedor de las pestañas, cambiar de pestaña lo tocaría. Al lado, ni se entera.
@@ -208,15 +211,15 @@
              Sigue visible en pantalla completa: es parte del board, no de la barra. -->
         <Grid x:Name="BoardArea" Grid.Row="2" Margin="4">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="TabsColumn" Width="*" />
-                <ColumnDefinition x:Name="DockSplitterColumn" Width="0" />
                 <ColumnDefinition x:Name="DockColumn" Width="0" />
+                <ColumnDefinition x:Name="DockSplitterColumn" Width="0" />
+                <ColumnDefinition x:Name="TabsColumn" Width="*" />
             </Grid.ColumnDefinitions>
 
             <!-- Acá viven las BoardView de TODAS las pestañas, apiladas. Se cambia de pestaña por
                  Visibility (ver BoardTab.Activate): las inactivas siguen vivas y colapsadas, así
                  sus clips no se re-montan al volver. -->
-            <Grid x:Name="BoardHost" Grid.Column="0" />
+            <Grid x:Name="BoardHost" Grid.Column="2" />
 
             <GridSplitter x:Name="DockSplitter" Grid.Column="1" Visibility="Collapsed"
                           Width="6" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
@@ -227,7 +230,7 @@
                           DragCompleted="OnDockSplitterDragCompleted" />
 
             <!-- La BoardView del panel la pone MainWindow (una sola, vive lo que la ventana). -->
-            <Grid x:Name="DockHost" Grid.Column="2" Visibility="Collapsed" />
+            <Grid x:Name="DockHost" Grid.Column="0" Visibility="Collapsed" />
         </Grid>
     </Grid>
 </Window>

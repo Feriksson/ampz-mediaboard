@@ -27,7 +27,7 @@ public partial class MainWindow : Window
     private BoardViewModel Board => _active!.Board;
 
     /// <summary>
-    /// El PANEL FIJADO, a la derecha de las pestañas y compartido por todas. Es del DOCUMENTO
+    /// El PANEL FIJADO, a la izquierda de las pestañas y compartido por todas. Es del DOCUMENTO
     /// (se guarda en el mismo `.mboard`), no de una pestaña. Ver Board/PinnedDock.
     /// </summary>
     private readonly PinnedDock _dock = new();
