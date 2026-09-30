@@ -269,6 +269,9 @@ del HWND: sin ventana nativa no hay nada que reposicionar y el resize es layout 
 celda**. Ocho timers compitiendo por la misma cola del Dispatcher se pisan, y el jitter arruina
 justo lo que queremos preciso: el punto de corte del loop.
 
+Con pestañas hay un `BoardViewModel` por pestaña, pero sigue latiendo **uno solo**: el de la
+pestaña activa. Los de segundo plano tienen el timer DETENIDO (ver "Pestañas").
+
 ### ⚠ VLC se precalienta al arrancar (`VlcEngine.Warmup`) — no lo saques
 
 `VlcEngine.Instance` es perezoso, así que **el primer archivo que arrastrás es el que paga el
@@ -450,6 +453,116 @@ visual: cada `VideoView` hostea una ventana nativa que hay que desenganchar a ma
 `MediaPlayer` vive en el `SectorNode` y **sobrevive** a la reconstrucción — por eso el clip sigue
 reproduciendo después de partir un sector.
 
+### ⚠ Cierre rápido: la ventana se ESCONDE antes de cerrarse (commit 8afdada)
+
+Reportado como *"con varios videos el cierre tarda segundos y se ve cerrar video por video"*.
+Causa: `MediaPlayer.Stop()` de libvlc es **BLOQUEANTE** (espera decoder, vout y la salida de audio
+WASAPI: ~100–500 ms por player) y se hacía **en fila, en el hilo de UI**, con la ventana visible y
+congelada. N sectores = N veces ese costo, a la vista.
+
+El arreglo tiene tres piezas, y ninguna sobra:
+
+| Pieza | Dónde | Qué resuelve |
+|---|---|---|
+| Stop + Dispose en **otro hilo, en paralelo** | `VlcEngine.Release(player)` | El cierre cuesta lo del Stop MÁS LENTO, no la suma. Hilo `LongRunning` y no del pool: son llamadas nativas que bloquean, con 8 sectores ocuparían el pool entero. |
+| La ventana se **esconde YA** y se cierra después | `MainWindow.BeginFastClose` | Lo que ve el usuario es la ventana irse al instante. |
+| Espera con **techo** | `VlcEngine.WhenReleased()` + `ReleaseTimeout` (3 s) | Un VLC trabado no puede dejar un proceso invisible vivo para siempre. |
+
+⚠ **Se ESCONDE, no se cierra, hasta que terminaron los Stop.** No es cosmético: cerrar destruye
+los HWND de los `VideoView`, y un vout que todavía no se detuvo quedaría dibujando sobre una
+ventana hija de una ventana muerta. Es el MISMO invariante que "desenganchar antes de liberar"
+(ver arriba), estirado a todo el cierre: `SectorNode.Unload` pone `Player = null` en el hilo de UI
+y RECIÉN DESPUÉS entrega el player a `Release`; el hilo de fondo toca solo ese objeto, nunca el
+nodo (que puede recibir otro clip mientras el viejo se detiene).
+
+⚠ El cierre real se **posterga una vuelta** del Dispatcher: WPF no deja esconder una ventana desde
+adentro de su propio `Closing` (tira `InvalidOperationException`). `OnClosing` pregunta por los
+cambios sin guardar, cancela, y agenda `BeginFastClose`, que termina en un `finally` —pase lo que
+pase la app se cierra; una excepción ahí dejaría un proceso escondido que nadie ve para matarlo.
+
+`VlcEngine.Shutdown` (en `App.OnExit`) espera las liberaciones con el mismo techo y **recién ahí**
+libera el `LibVLC`. Si la espera vence, NO lo libera: soltar el runtime debajo de hilos nativos
+que lo usan es peor que dejárselo al SO en un proceso que se muere igual.
+
+⚠ **`Remount` NO re-monta un clip que todavía no arrancó** (`_pending != null`). Estaba cargando
+cada archivo DOS VECES al abrir un board: `LoadFrom` deja los clips pendientes, `ReplaceRoot` →
+`Rebuild` llamaba a `Remount` sobre cada uno, y eso los reabría. Un clip que nunca se reprodujo
+no tiene ventana vieja de la que rescatarlo: la vista nueva lo arranca sola vía `StartPending`.
+Regresión: `tools/RestartProbe`, caso 4 (visto en rojo sin la guarda).
+
+Regresión del cierre: `tools/test-close.ps1` (8 sectores reproduciendo). Mide cuánto tarda en
+IRSE la ventana desde `CloseMainWindow()`; el tiempo hasta que sale el proceso es informativo.
+Umbral 400 ms, calibrado MIDIENDO las dos versiones: código viejo 1030–1298 ms (rojo), nuevo
+59–141 ms (verde). Con menos sectores el rojo se acerca al umbral (es N × ~150 ms): por eso el
+default es 8, el tope de uso previsto.
+
+### Pestañas: varios boards en la misma ventana (commit 594f24e)
+
+> ⚠ **El modelo de PERSISTENCIA de las pestañas se está rediseñando**: hoy cada pestaña es su
+> propio `.mboard`, y la decisión del usuario es que **un solo archivo declare TODAS las
+> pestañas**. Por eso acá se documenta SOLO la mecánica en runtime; las reglas de
+> abrir/cerrar/guardar por archivo van a cambiar y no se fijan todavía como ley.
+
+**`BoardTab`** (`Board/BoardTab.cs`) es todo el estado por-board que antes vivía suelto en
+`MainWindow`: su `BoardViewModel`, su `BoardView`, su archivo y su título. La vista se crea **UNA
+vez** y vive lo mismo que la pestaña.
+
+**Se cambia de pestaña por `Visibility`, no reconstruyendo.** Las `BoardView` de TODAS las
+pestañas viven apiladas en `BoardHost`; la inactiva está `Collapsed` (no `Hidden`: `Hidden` sigue
+participando del layout, igual que en el congelado del splitter). Reconstruir la vista al volver
+obligaría a `Remount` en cada sector (bug 4): VLC reabriendo cada archivo, frames negros y un
+salto visible. Así, cambiar de pestaña es cambiar dos `Visibility` — medido en 4–12 ms adentro de
+la app, y **0 archivos reabiertos**.
+
+⚠ **Por eso NO es un `TabControl`.** El `TabControl` descarga el contenido de las pestañas no
+seleccionadas, que es exactamente destruir los `VideoView`. La tira es un `ItemsControl` a mano
+que solo dibuja los botones; el contenido no vive ahí.
+
+Una pestaña de SEGUNDO PLANO está **suspendida** (`BoardTab.Deactivate` → `BoardViewModel.Suspend`
++ `BoardView.SetSuspended`), no destruida:
+- **Congelada** con el MISMO `SectorNode.Freeze/Thaw` del arrastre de splitter: pausa el clip y
+  anota si hay que reanudarlo. Solo vuelve a Play lo que estaba REPRODUCIENDO (un clip que
+  pausaste a mano no arranca porque cambiaste de pestaña). `Freeze` mira también el `IsPlaying`
+  propio y no solo el de VLC: un clip recién abierto pasa cientos de ms en Opening/Buffering con
+  `player.IsPlaying == false`, y sin eso quedaba decodificando en una pestaña invisible.
+- **Latido DETENIDO**, no salteado: ocho pestañas serían ocho timers de 30 Hz peleando la cola
+  del Dispatcher por nada — justo el jitter que el latido único existe para evitar.
+- **El Play espera a una superficie visible**: una pestaña que nace en segundo plano (y ya carga
+  su board) deja sus clips PENDIENTES; arrancan en `Video.IsVisibleChanged` →
+  `StartWhenSurfaceReady` al mostrarse. Si no, sería el bug 1 (VLC con su propia ventana).
+- **El playhead se RE-ANCLA al volver** (`Thaw` → `Reanchor` al `Time` real de VLC). El ancla de
+  antes tiene un `TickCount` viejo (segundos o minutos), y el primer Tick le sumaría el techo de
+  extrapolación entero: 600 ms inventados que, cerca del marker B, disparan un loop que nadie pidió.
+- Un `DragCompleted` de splitter que llega con el board suspendido **no descongela**
+  (`EndInteractiveResize`): arrancaría clips en una pestaña que nadie ve.
+
+Al cerrar la ventana, el cierre rápido suelta los boards de TODAS las pestañas: todos sus players
+se detienen en paralelo y el cierre sigue costando lo del Stop más lento, no la suma.
+
+**`DiagLog`** (`DiagLog.cs`): log de diagnóstico **apagado salvo que `AMPZ_DIAG_LOG` apunte a un
+archivo** — el usuario nunca ve un log que no pidió. Existe porque hay hechos que desde afuera no
+se miden con confianza y desde adentro son triviales: el costo de un cambio de pestaña medido por
+UI Automation mezcla el marshaling entre procesos (medido: hasta 250 ms la llamada `Invoke` sola),
+y un negro de 200 ms se le escapa a cualquier muestreo de pantalla. Adentro se escribe `switch
+<ms>` (cambio de pestaña), `open <path>` (cada `Media` creado, para contar re-aperturas) y `audio
+…` (volumen pedido vs. el que VLC dice tener, ver "Audio por sector").
+
+Regresión: `tools/test-tabs.ps1` (UI Automation + `DiagLog`). Verifica cambio < 100 ms en la app,
+pestañas inactivas pausadas (CPU con la pestaña vacía visible < CPU de UNA pestaña reproduciendo),
+0 re-aperturas al ir y volver, video vivo al volver, y ninguna ventana de VLC suelta. Visto en rojo
+sin la pausa y con reconstrucción.
+
+**Límites conocidos** (medidos, no resueltos):
+- La **primera vez** que se muestra una pestaña abierta en segundo plano tarda **0,7–3,5 s**: su
+  primera pasada de layout crea los `VideoView` y sus ventanas nativas. Es el costo de ABRIR un
+  board, diferido; los cambios siguientes son instantáneos.
+- Una pestaña **pausada NO es gratis**: ~90–230 ms/s de CPU (un player pausado sigue vivo).
+- **"Guardar como" sobre un archivo que está abierto en OTRA pestaña no está protegido**: las dos
+  pestañas quedarían apuntando al mismo archivo y se pisarían. (Queda atado al rediseño de la
+  persistencia.)
+- Que **F11 esconda la tira de pestañas** está en el código pero **no está verificado**:
+  `test-fullscreen.ps1` falla también en la base (el F11 por keystroke no llega).
+
 ### ⚠ Bugs ya cazados — no los revivas
 
 Cinco trampas que ya costaron una ronda de debug. La 1, la 2, la 3 y la 5 se reportaron desde la
@@ -548,6 +661,11 @@ pedir problemas. El arrastre nunca sale de esta ventana, así que un campo está
 no puede fallar. Se limpia en un `finally` porque `DoDragDrop` es bloqueante y un origen colgado
 haría que el próximo arrastre mueva el clip equivocado.
 
+Con pestañas sigue valiendo tal cual: el arrastre es DENTRO de un board (solo la pestaña activa
+es visible y `DoDragDrop` bloquea, así que no hay forma de soltar en otra), y el swap lo resuelve
+el `BoardViewModel` de la vista destino. La foto lleva el volumen **del sector**, nunca el volumen
+general del board: cada nodo conserva el master de SU board (ver "Audio por sector").
+
 ### Audio por sector
 
 Volumen (`0..100`) y silencio son **por sector**, no globales: en un board con varios clips
@@ -562,6 +680,42 @@ cuando el input abrió. Por eso `SectorNode.ApplyAudio` se llama en **TRES** mom
 propiedad, en `StartPending` (después del `Play`), y en el tick donde la duración se conoce por
 primera vez — que es la señal de que el media abrió de verdad. Llamarlo una sola vez al cargar deja
 el nivel sin aplicar y el sector suena siempre a 100.
+
+**Shift+click en el silencio = SOLO** (`BoardViewModel.Solo`): silencia todos los demás sectores
+del MISMO board y le quita el silencio a este. Toca **solo el mute, nunca el volumen** — deshacer
+un solo es des-silenciar, y cada sector vuelve a sonar como estaba. No alcanza a las otras
+pestañas (están pausadas y son otro trabajo). Saltea imágenes y sectores vacíos
+(`SectorNode.HasAudio`); un video AUSENTE sí se silencia, porque su mute se persiste y viaja.
+⚠ Se intercepta en el `PreviewMouseLeftButtonDown` del `MuteButton` y se marca `Handled`: si el
+`ToggleButton` viera el click, primero invertiría el mute de este sector por el binding TwoWay y el
+solo se pelearía con ese toggle. El tooltip dice el modificador: uno que nadie conoce no existe.
+
+**Volumen general del board** (barra superior, actúa sobre la pestaña ACTIVA): **ESCALA, nunca
+pisa** (decisión del usuario). VLC recibe `round(sector × master / 100)`
+(`SectorNode.EffectiveVolume`, función pura para poder probarla sin VLC); el `Volume` de cada
+sector y su slider no se tocan, así la MEZCLA se conserva — 80 contra 20 sigue siendo 4 a 1.
+- Es **POR BOARD** (`BoardViewModel.MasterVolume`, default 100) y se **EMPUJA** a cada sector
+  (`SectorNode.BoardMasterVolume`), no se consulta por callback: el nodo existe SIN board
+  (BoardStore arma el árbol antes de que ningún board lo adopte, y las sondas lo usan suelto), y
+  así la dependencia queda en un solo sentido. ⚠ Por eso hay que empujarlo en CADA lugar donde
+  entra un sector al board (`Split`, `ReplaceRoot`): uno que no lo recibe suena al 100 % sin aviso.
+- Cambiar el master re-aplica el audio de todo el board en el acto; es la misma entrada que
+  "cambió la propiedad", así que los TRES momentos de arriba siguen cubriéndolo.
+- Se persiste en el `.mboard` como `MasterVolume` del **board** (hoy, el nodo raíz del archivo).
+  ⚠ Se escribe **solo si difiere de 100**, y la normalización de `MatchesFile` aplica la misma
+  regla. Si se escribiera siempre, un archivo viejo (sin el campo) serializaría distinto que el
+  mismo board en memoria, y abrir-y-cerrar sin tocar nada preguntaría "¿guardar?".
+- No viaja en `MediaSnapshot` (es del board, no del clip). Sin botón de mute propio: bajarlo a 0
+  ya calla el board.
+
+⚠ **Hallazgo abierto (2026-09-30), NO resuelto: el volumen y el mute de VLC parecen COMPARTIDOS
+entre todos los players del proceso.** Con la salida de audio por defecto (mmdevice/WASAPI),
+leyendo `player.Volume`/`player.Mute` por `DiagLog` justo después de aplicarlos, cada sector
+devuelve el valor que acaba de poner el OTRO (sector a 80 lee 10, un sector sin mute lee
+`Mute=True`): gana el último que escribe. Pasa igual con el master en 100, o sea que es
+**anterior** al master y afecta al volumen por sector, al mute y al solo. Con `--aout=directsound`
+cada player conserva lo suyo. Es evidencia por readback, no por oído: confirmarlo escuchando antes
+de cambiar el motor de audio (decisión aparte, no tomada).
 
 ### Drag & drop y el HWND
 
@@ -769,7 +923,11 @@ está mostrando un error que no leíste.
 | `A` | Fijar el marker de INICIO del loop en el playhead |
 | `B` | Fijar el marker de FIN del loop en el playhead |
 | `L` | Prender/apagar la zona de loop |
-| `Ctrl+N` | Board nuevo (un solo sector vacío) |
+| `Ctrl+T` / `Ctrl+N` | Pestaña NUEVA con un board vacío. `Ctrl+N` ya no pisa el board actual: es el mismo gesto que `Ctrl+T` |
+| `Ctrl+W` | Cerrar la pestaña activa (con el aviso de cambios sin guardar). Click del medio sobre una pestaña, igual |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Pestaña siguiente / anterior (da la vuelta) |
+| `Ctrl+1`…`Ctrl+8` | Ir a esa pestaña. **`Ctrl+9` va a la ÚLTIMA**, como en cualquier navegador |
+| Shift+click en el botón de silencio | SOLO: silencia los demás sectores del board y deja sonando este |
 | `Ctrl+O` | Abrir un `.mboard` |
 | `Ctrl+S` | Guardar en el archivo actual (si no hay, pregunta dónde) |
 | `Ctrl+Shift+S` | Guardar como… |
@@ -882,12 +1040,12 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | Carpeta | Qué vive ahí |
 |---|---|
 | `Layout/` | El árbol: `LayoutNode`, `SplitNode`, `SectorNode` (nodo + estado del media + loop). |
-| `Board/` | `BoardViewModel` (árbol + latido + split/close) y `BoardView` (materializa el árbol a controles). |
+| `Board/` | `BoardViewModel` (árbol + latido + split/close + solo + volumen general), `BoardView` (materializa el árbol a controles) y `BoardTab` (una pestaña: board + vista + archivo). |
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path). ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
-| raíz | `App`, `MainWindow`, `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path, **cierre rápido** —`test-close.ps1`— y **pestañas** —`test-tabs.ps1`—). `test-multi.ps1` y `test-boardfile.ps1` derivan el exe de `$PSScriptRoot` y generan su GIF de prueba en `%TEMP%` con ffmpeg (hasta 2026-09-30 apuntaban a la carpeta vieja del repo y a un scratchpad borrado: fallaban siempre). ⚠ `test-boardfile.ps1` BORRA la asociación `.mboard` y la vuelve a registrar contra el exe de **Debug**: después de correrlo, repuntala al Release con "Asociar .mboard" o el doble click abre el binario equivocado. ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el **solo** (caso 5), la cuenta y el empuje del **volumen general** (caso 6) y su round-trip en el `.mboard` más el archivo VIEJO sin el campo que tiene que cargar en 100 y NO leerse como modificado (caso 7); el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
+| raíz | `App`, `MainWindow`, `DiagLog` (log de diagnóstico, solo con `AMPZ_DIAG_LOG`), `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---
 

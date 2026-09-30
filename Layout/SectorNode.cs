@@ -169,6 +169,56 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
     partial void OnIsMutedChanged(bool value) => ApplyAudio();
 
+    private int _boardMasterVolume = 100;
+
+    /// <summary>
+    /// Volumen general del BOARD al que pertenece este sector, 0..100. NO es del sector: lo
+    /// EMPUJA <c>BoardViewModel</c> (al cambiar el master, al partir, al reemplazar el árbol).
+    ///
+    /// ¿Por qué empujado y no un callback al board? Porque el nodo existe SIN board: BoardStore
+    /// arma el árbol entero (y hasta carga los clips) antes de que ningún BoardViewModel lo
+    /// adopte, y las sondas lo usan suelto. Un callback obligaría a un "board nulo" en cada una
+    /// de esas rutas; un valor empujado arranca en 100 (neutro) y el nodo sigue siendo
+    /// autosuficiente. Además deja la dependencia en un solo sentido: board → nodo.
+    ///
+    /// ⚠ NO viaja en <see cref="MediaSnapshot"/> ni se persiste por sector: es del board. Al
+    /// intercambiar clips entre sectores, cada nodo conserva el master de SU board.
+    /// </summary>
+    public int BoardMasterVolume
+    {
+        get => _boardMasterVolume;
+        set
+        {
+            var clamped = Math.Clamp(value, 0, 100);
+            if (_boardMasterVolume == clamped) return;
+            _boardMasterVolume = clamped;
+            ApplyAudio();
+        }
+    }
+
+    /// <summary>
+    /// Volumen que recibe VLC: el del sector ESCALADO por el master del board.
+    ///
+    /// Escala y no pisa (decisión del usuario): bajar el master a la mitad baja TODO a la mitad
+    /// y conserva la MEZCLA — el sector que tenías a 80 contra otro a 20 sigue sonando 4 veces
+    /// más fuerte. Pisar los volúmenes con el master borraría ese balance que te costó armar.
+    /// Función pura y estática para poder probarla sin VLC (tools/BoardProbe).
+    /// </summary>
+    public static int EffectiveVolume(int sectorVolume, int masterVolume) =>
+        (int)Math.Round(
+            Math.Clamp(sectorVolume, 0, 100) * Math.Clamp(masterVolume, 0, 100) / 100.0,
+            MidpointRounding.AwayFromZero);
+
+    /// <summary>
+    /// ¿Este sector tiene (o tendría) audio? Video cargado, o un video AUSENTE: su silencio se
+    /// persiste y viaja con el clip, así que el "solo" también lo tiene que alcanzar — al
+    /// re-vincularlo tiene que volver callado, como el resto del board.
+    /// Imágenes y sectores vacíos no suenan: tocarles el mute sería cambiar un estado invisible.
+    /// </summary>
+    public bool HasAudio =>
+        Kind == MediaKind.Video ||
+        (MissingPath is { } missing && MediaKinds.FromPath(missing) == MediaKind.Video);
+
     /// <summary>
     /// Empuja volumen y mute al reproductor.
     ///
@@ -177,12 +227,21 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// propiedad, al arrancar la reproducción, y en el tick donde la duración se conoce por
     /// primera vez (que es la señal de que el media ya abrió de verdad). Llamarlo una sola vez
     /// al cargar deja el nivel sin aplicar y el sector suena siempre a 100.
+    /// (Cambiar el master del board es una cuarta entrada, pero es la misma que "cambió la
+    /// propiedad": ver <see cref="BoardMasterVolume"/>.)
     /// </summary>
     private void ApplyAudio()
     {
         if (Player is null) return;
-        Player.Volume = Math.Clamp(Volume, 0, 100);
+        var effective = EffectiveVolume(Volume, BoardMasterVolume);
+        Player.Volume = effective;
         Player.Mute = IsMuted;
+
+        // Para las pruebas: lo que PEDIMOS y lo que VLC dice tener. Antes de que exista la salida
+        // de audio VLC devuelve -1, y es justo lo que demuestra por qué hacen falta los tres
+        // momentos. Apagado salvo con AMPZ_DIAG_LOG.
+        if (DiagLog.Enabled)
+            DiagLog.Write($"audio {Title} sector={Volume} master={BoardMasterVolume} req={effective} vlc={Player.Volume} mute={IsMuted} vlcmute={Player.Mute}");
     }
 
     /// <summary>

@@ -20,6 +20,9 @@ internal static class Program
         SwapSobreSectorVacioEsUnMovimiento();
         VolumenYSilencioSobrevivenElGuardado();
         DistribuirDejaTodosLosSectoresIguales();
+        SoloSilenciaATodosMenosUno();
+        MasterEscalaSinPisar();
+        MasterSobreviveAlGuardadoYLosViejosNoCambian();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -146,6 +149,95 @@ internal static class Program
 
         // Y la suma cierra en 1: si diera menos, habria espacio muerto; si diera mas, se pisan.
         Check("las tres areas suman el board entero", Math.Abs(Area(a) + Area(b) + Area(c) - 1) < 0.0001);
+    }
+
+    /// <summary>
+    /// Shift+click en el silencio = SOLO. Mezcla a proposito sectores que NO suenan (una imagen
+    /// ausente y un sector vacio): el solo no les puede tocar el mute. Y el objetivo arranca
+    /// SILENCIADO, que es el caso que importa: pedir "solo este" tiene que des-silenciarlo.
+    /// </summary>
+    private static void SoloSilenciaATodosMenosUno()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 5. SOLO: SILENCIA A LOS DEMAS Y DEJA SONANDO ESTE ===");
+
+        var a = SectorCon(@"D:\clips\a.mp4", 0, 100, 40, false);
+        var b = SectorCon(@"D:\clips\b.mp4", 0, 100, 65, true);   // el objetivo, silenciado
+        var c = SectorCon(@"D:\clips\c.mp4", 0, 100, 90, false);
+        var foto = SectorCon(@"D:\clips\foto.png", 0, 0, 100, false);
+        var vacio = new SectorNode();
+
+        var vm = new BoardViewModel();
+        vm.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal,
+            new SplitNode(SplitOrientation.Vertical, a, b),
+            new SplitNode(SplitOrientation.Vertical, c, new SplitNode(SplitOrientation.Horizontal, foto, vacio))));
+        vm.Solo(b);
+
+        Check("el objetivo quedo SIN silencio", !b.IsMuted);
+        Check("los otros videos quedaron silenciados", a.IsMuted && c.IsMuted);
+        Check("los volumenes NO se tocaron", a.Volume == 40 && b.Volume == 65 && c.Volume == 90);
+        Check("la imagen y el vacio no se tocaron", !foto.IsMuted && !vacio.IsMuted);
+    }
+
+    /// <summary>
+    /// Volumen general: ESCALA, nunca pisa. Se prueba la cuenta pura (lo que recibe VLC) y que el
+    /// board le EMPUJE el master a todos sus sectores — incluido uno nacido de partir despues.
+    /// </summary>
+    private static void MasterEscalaSinPisar()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 6. VOLUMEN GENERAL: ESCALA LA MEZCLA SIN PISARLA ===");
+
+        Check("80 al 50% = 40", SectorNode.EffectiveVolume(80, 50) == 40);
+        Check("20 al 50% = 10 (la mezcla 4:1 se conserva)", SectorNode.EffectiveVolume(20, 50) == 10);
+        Check("master 100 no cambia nada", SectorNode.EffectiveVolume(73, 100) == 73);
+        Check("master 0 silencia", SectorNode.EffectiveVolume(73, 0) == 0);
+        Check("redondea (33 al 50% = 17)", SectorNode.EffectiveVolume(33, 50) == 17);
+        Check("fuera de rango se sanea", SectorNode.EffectiveVolume(150, 200) == 100);
+
+        var x = SectorCon(@"D:\clips\x.mp4", 0, 100, 80, false);
+        var y = SectorCon(@"D:\clips\y.mp4", 0, 100, 20, false);
+        var vm = new BoardViewModel();
+        vm.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal, x, y));
+        vm.MasterVolume = 30;
+        vm.Split(y, SplitOrientation.Vertical);
+        var nuevo = vm.Selected!;
+
+        Check("todos los sectores recibieron el master", x.BoardMasterVolume == 30 && y.BoardMasterVolume == 30);
+        Check("el sector nacido de partir tambien", nuevo.BoardMasterVolume == 30);
+        Check("el volumen PROPIO de cada sector quedo intacto", x.Volume == 80 && y.Volume == 20);
+    }
+
+    /// <summary>
+    /// El master se persiste en el .mboard, y un archivo VIEJO (sin el campo) carga con 100 y NO
+    /// se lee como modificado — si no, abrir y cerrar un board de antes preguntaria "guardar?".
+    /// El archivo viejo se escribe COMPACTO a proposito: ejercita tambien la normalizacion.
+    /// </summary>
+    private static void MasterSobreviveAlGuardadoYLosViejosNoCambian()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 7. VOLUMEN GENERAL EN EL .mboard (Y ARCHIVOS VIEJOS) ===");
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-master.mboard");
+        LayoutNode raiz = SectorCon(@"D:\clips\m.mp4", 10, 200, 60, false);
+        Check("se pudo guardar con master 35", BoardStore.SaveTo(archivo, raiz, 35) is null);
+
+        var leido = BoardStore.LoadFrom(archivo, out var master);
+        Check("el master vuelve en 35", master == 35);
+        Check("el board releido coincide con el archivo", leido is not null && BoardStore.MatchesFile(archivo, leido, master));
+
+        // Sin paths adentro: un path de Windows tipeado en un JSON a mano es JSON invalido (ver
+        // CLAUDE.md, test-missing). Un sector vacio alcanza para probar el campo que falta.
+        var viejo = Path.Combine(Path.GetTempPath(), "probe-master-viejo.mboard");
+        File.WriteAllText(viejo,
+            """{"Type":"sector","Ratio":0.5,"LoopStart":0,"LoopEnd":0,"LoopEnabled":true,"Volume":60,"Muted":false}""");
+        var leidoViejo = BoardStore.LoadFrom(viejo, out var masterViejo);
+        Check("un archivo viejo (sin el campo) carga con master 100", masterViejo == 100);
+        Check("y NO se lee como modificado", leidoViejo is not null && BoardStore.MatchesFile(viejo, leidoViejo, masterViejo));
+        Check("pero mover el master SI es un cambio", leidoViejo is not null && !BoardStore.MatchesFile(viejo, leidoViejo, 50));
+
+        File.Delete(archivo);
+        File.Delete(viejo);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

@@ -4,8 +4,15 @@
 # Nota: hasta v1.2.0 este script tambien verificaba a quien le pertenecia el estado de sesion.
 # Esa verificacion murio junto con la sesion — ver tools/test-clean-start.ps1.
 
-$exe   = 'C:\Users\ampz\Desktop\Repos personales\ampz-mediaboard -dev\bin\Debug\net10.0-windows\AmpzMediaBoard.exe'
-$clip  = 'C:\Users\ampz\AppData\Local\Temp\claude\C--Users-ampz-Desktop-Repos-personales-ampz-mediaboard--dev\0dbfb6b6-ec30-4f72-8818-d75d565ae8a0\scratchpad\test-clip.gif'
+# Rutas DERIVADAS del script, nunca tipeadas: la version anterior apuntaba a la carpeta vieja del
+# repo y a un clip en el scratchpad de una sesion ya borrada, y fallaba en cualquier maquina.
+$repo  = Split-Path -Parent $PSScriptRoot
+$exe   = Join-Path $repo 'bin\Debug\net10.0-windows\AmpzMediaBoard.exe'
+$clip  = Join-Path $env:TEMP 'ampz-test-clip.gif'
+if (-not (Test-Path $clip)) {
+    if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { [Console]::WriteLine('No hay ffmpeg para generar el clip.'); exit 1 }
+    ffmpeg -v error -y -f lavfi -i 'testsrc=size=160x120:rate=10' -t 2 $clip
+}
 $board = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'board-multi.mboard')
 
 Stop-Process -Name AmpzMediaBoard -Force -ErrorAction SilentlyContinue

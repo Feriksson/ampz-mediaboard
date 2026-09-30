@@ -137,6 +137,10 @@ public partial class MainWindow : Window
         tab.RefreshModified();
         UpdateTitle();
 
+        // El slider de volumen general es UNO solo en la barra y actúa sobre la pestaña ACTIVA:
+        // se re-apunta al board entrante y así muestra SU valor (cada board tiene el suyo).
+        MasterVolumePanel.DataContext = tab.Board;
+
         // Con la tira desbordada, la pestaña activa puede estar fuera de la vista (Ctrl+Tab
         // hacia una del final). Se trae a la vista después del layout, cuando ya tiene posición.
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
@@ -297,7 +301,7 @@ public partial class MainWindow : Window
     /// aviso que salta cuando no hace falta es un aviso que el usuario aprende a ignorar.
     /// </summary>
     private static bool HasUnsavedWork(BoardTab tab) =>
-        tab.FilePath is null ? !tab.IsEmpty : !BoardStore.MatchesFile(tab.FilePath, tab.Board.Root);
+        tab.FilePath is null ? !tab.IsEmpty : !BoardStore.MatchesFile(tab.FilePath, tab.Board.Root, tab.Board.MasterVolume);
 
     /// <summary>
     /// Pregunta antes de perder trabajo de UNA pestaña. Devuelve false si el usuario decidió NO
@@ -374,7 +378,7 @@ public partial class MainWindow : Window
 
         // Se lee ANTES de elegir pestaña: si el archivo está corrupto no queda una pestaña
         // vacía creada de más.
-        var root = BoardStore.LoadFrom(path);
+        var root = BoardStore.LoadFrom(path, out var master);
         if (root is null)
         {
             MessageBox.Show(
@@ -384,7 +388,7 @@ public partial class MainWindow : Window
         }
 
         var target = _active.IsBlank ? _active : AddTab();
-        target.Open(root, full);
+        target.Open(root, full, master);
         if (activate) SwitchTo(target);
         UpdateTitle();
     }
@@ -417,7 +421,7 @@ public partial class MainWindow : Window
 
     private bool Write(BoardTab tab, string path)
     {
-        var error = BoardStore.SaveTo(path, tab.Board.Root);
+        var error = BoardStore.SaveTo(path, tab.Board.Root, tab.Board.MasterVolume);
         if (error is not null)
         {
             // Un "guardar" que falla en silencio es la peor mentira que le podés decir al usuario:

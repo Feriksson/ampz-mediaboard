@@ -217,12 +217,12 @@
                     <ToggleButton x:Name="MuteButton" Margin="6,0,0,0" Width="30"
                                   IsChecked="{Binding IsMuted, Mode=TwoWay}"
                                   Style="{DynamicResource MuteToggle}"
-                                  ToolTip="Silenciar este sector" />
+                                  ToolTip="Silenciar · Shift+click: dejar solo este" />
                     <Slider x:Name="VolumeSlider" Width="66" Margin="4,0,0,0" VerticalAlignment="Center"
                             Minimum="0" Maximum="100" SmallChange="5" LargeChange="10"
                             Value="{Binding Volume, Mode=TwoWay}"
                             Style="{DynamicResource VolumeSlider}"
-                            ToolTip="Volumen de este sector" />
+                            ToolTip="Volumen de este sector (el volumen general del board lo escala)" />
 
                     <TextBlock x:Name="TimeLabel" VerticalAlignment="Center" Margin="10,0,0,0"
                                FontFamily="Consolas" FontSize="11"

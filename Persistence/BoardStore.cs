@@ -47,7 +47,29 @@ public static class BoardStore
         public bool LoopEnabled { get; set; } = true;
         public int Volume { get; set; } = 100;
         public bool Muted { get; set; }
+
+        // --- board (SOLO en el nodo raíz del árbol de UN board) ---
+
+        /// <summary>
+        /// Volumen general del board. Es un dato del BOARD, no del archivo: vive en el nodo raíz
+        /// del árbol de ese board, que HOY coincide con la raíz del `.mboard` porque el archivo
+        /// guarda un solo board. Así, cuando el archivo pase a declarar varias pestañas (rediseño
+        /// pendiente: un archivo para todas), cada entrada de pestaña se lleva su master adentro
+        /// sin moverlo de lugar. Y no se agregó un sobre alrededor del árbol a propósito: el
+        /// formato sigue siendo el de siempre y los archivos viejos se leen sin migración.
+        ///
+        /// ⚠ Nullable y se escribe SOLO si difiere de 100 (ver <see cref="MasterOrNull"/>). No es
+        /// ahorro de bytes: si se escribiera siempre, un `.mboard` viejo —que no lo tiene—
+        /// serializaría distinto que el mismo board en memoria, y abrirlo y cerrarlo sin tocar
+        /// nada preguntaría "¿guardar los cambios?". Un aviso que miente es un aviso que el
+        /// usuario aprende a ignorar.
+        /// </summary>
+        public int? MasterVolume { get; set; }
     }
+
+    /// <summary>El master como se escribe: null (= ausente) cuando es el 100 por defecto.</summary>
+    private static int? MasterOrNull(int? master) =>
+        master is { } m && Math.Clamp(m, 0, 100) != 100 ? Math.Clamp(m, 0, 100) : null;
 
     #region Archivos .mboard
 
@@ -59,7 +81,12 @@ public static class BoardStore
     /// clip, mover un marker, partir un sector, arrastrar un splitter…) y alcanza con que se
     /// escape una para que el aviso mienta. Comparar el resultado no puede equivocarse.
     /// </summary>
-    public static string Serialize(LayoutNode root) => JsonSerializer.Serialize(ToDto(root), Options);
+    public static string Serialize(LayoutNode root, int masterVolume = 100)
+    {
+        var dto = ToDto(root);
+        dto.MasterVolume = MasterOrNull(masterVolume);
+        return JsonSerializer.Serialize(dto, Options);
+    }
 
     /// <summary>
     /// ¿El board en memoria coincide con lo que hay guardado en el archivo? Lo usa el aviso de
@@ -72,9 +99,9 @@ public static class BoardStore
     /// como "modificado" sin que nadie haya tocado nada — y el usuario aprendería a ignorar el
     /// aviso, que es la peor forma de romper una advertencia.
     /// </summary>
-    public static bool MatchesFile(string path, LayoutNode root) =>
+    public static bool MatchesFile(string path, LayoutNode root, int masterVolume = 100) =>
         ReadNormalized(path) is not { } saved ||
-        string.Equals(Serialize(root), saved, StringComparison.Ordinal);
+        string.Equals(Serialize(root, masterVolume), saved, StringComparison.Ordinal);
 
     /// <summary>
     /// El contenido del archivo normalizado (deserializado y vuelto a serializar con las mismas
@@ -90,7 +117,12 @@ public static class BoardStore
         try
         {
             var dto = JsonSerializer.Deserialize<NodeDto>(File.ReadAllText(path), Options);
-            return dto is null ? null : JsonSerializer.Serialize(dto, Options);
+            if (dto is null) return null;
+
+            // La MISMA regla que al escribir: un "MasterVolume": 100 explícito (board editado a
+            // mano) y un archivo viejo sin el campo describen el mismo board.
+            dto.MasterVolume = MasterOrNull(dto.MasterVolume);
+            return JsonSerializer.Serialize(dto, Options);
         }
         catch
         {
@@ -99,11 +131,11 @@ public static class BoardStore
     }
 
     /// <summary>Guarda el board en un archivo del usuario. Devuelve el error si falló, o null si salió bien.</summary>
-    public static string? SaveTo(string path, LayoutNode root)
+    public static string? SaveTo(string path, LayoutNode root, int masterVolume = 100)
     {
         try
         {
-            File.WriteAllText(path, Serialize(root));
+            File.WriteAllText(path, Serialize(root, masterVolume));
             return null;
         }
         catch (Exception ex)
@@ -116,12 +148,21 @@ public static class BoardStore
     }
 
     /// <summary>Carga un board desde un archivo. Devuelve null si no se pudo leer o parsear.</summary>
-    public static LayoutNode? LoadFrom(string path)
+    public static LayoutNode? LoadFrom(string path) => LoadFrom(path, out _);
+
+    /// <summary>
+    /// Carga un board y además su volumen general. Un archivo sin el campo (anterior a que
+    /// existiera) carga con 100: el board suena exactamente como sonaba cuando se guardó.
+    /// </summary>
+    public static LayoutNode? LoadFrom(string path, out int masterVolume)
     {
+        masterVolume = 100;
         try
         {
             var dto = JsonSerializer.Deserialize<NodeDto>(File.ReadAllText(path), Options);
-            return dto is null ? null : FromDto(dto);
+            if (dto is null) return null;
+            masterVolume = MasterOrNull(dto.MasterVolume) ?? 100;
+            return FromDto(dto);
         }
         catch
         {

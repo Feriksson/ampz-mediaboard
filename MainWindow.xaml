@@ -44,6 +44,28 @@
                          "¿sobre cuál actúa?" que resolver mirando qué celda está seleccionada. -->
                     <Button x:Name="DistributeButton" Content="Distribuir" Style="{StaticResource ToolbarButton}"
                             ToolTip="Ctrl+E — reparte el espacio en partes iguales entre todos los sectores" />
+
+                    <Border Width="1" Background="#2E2E3A" Margin="8,2,8,2" />
+
+                    <!-- ══ Volumen general del board ══
+                         ESCALA el volumen de cada sector (sector × master / 100), nunca lo pisa:
+                         la mezcla que armaste se conserva. Es de la pestaña ACTIVA — el
+                         DataContext lo re-apunta MainWindow.SwitchTo al board entrante. Sin botón
+                         de mute propio: bajarlo a 0 ya silencia el board, y el mute por sector
+                         (con Shift+click = solo) cubre el resto. -->
+                    <StackPanel x:Name="MasterVolumePanel" Orientation="Horizontal" VerticalAlignment="Center"
+                                ToolTip="Volumen general del board (escala todos los sectores)">
+                        <TextBlock Text="Volumen" FontSize="11" VerticalAlignment="Center"
+                                   Foreground="{StaticResource DimTextBrush}" />
+                        <Slider x:Name="MasterVolumeSlider" Width="90" Margin="6,0,0,0" VerticalAlignment="Center"
+                                Minimum="0" Maximum="100" SmallChange="5" LargeChange="10"
+                                Value="{Binding MasterVolume, Mode=TwoWay}"
+                                Style="{StaticResource VolumeSlider}"
+                                AutomationProperties.Name="Volumen general del board" />
+                        <TextBlock Text="{Binding MasterVolume, StringFormat={}{0}%}" Width="32" Margin="6,0,0,0"
+                                   FontSize="10" FontFamily="Consolas" VerticalAlignment="Center"
+                                   Foreground="{StaticResource DimTextBrush}" />
+                    </StackPanel>
                 </StackPanel>
 
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">

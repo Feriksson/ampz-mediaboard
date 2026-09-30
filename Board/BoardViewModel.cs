@@ -38,6 +38,56 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     [ObservableProperty] private LayoutNode _root;
     [ObservableProperty] private SectorNode? _selected;
 
+    /// <summary>
+    /// Volumen general del board, 0..100. ESCALA el de cada sector, nunca lo pisa: ver
+    /// <see cref="SectorNode.EffectiveVolume"/>. Es POR BOARD (cada pestaña tiene el suyo) y se
+    /// persiste en el `.mboard`, porque es parte de cómo suena ESE board.
+    /// </summary>
+    [ObservableProperty] private int _masterVolume = 100;
+
+    /// <summary>
+    /// El master se EMPUJA a cada sector (ver <see cref="SectorNode.BoardMasterVolume"/> para
+    /// por qué empujado y no consultado). Cambiarlo re-aplica el audio de todo el board en el acto.
+    /// </summary>
+    partial void OnMasterVolumeChanged(int value)
+    {
+        var clamped = Math.Clamp(value, 0, 100);
+        if (clamped != value) { MasterVolume = clamped; return; }
+        PushMaster(Root);
+    }
+
+    /// <summary>
+    /// Lleva el master a todos los sectores de un (sub)árbol. Hace falta en CADA punto donde
+    /// entra un sector nuevo al board (partir, reemplazar el árbol): un sector que no lo recibe
+    /// sonaría al 100% de su volumen, ignorando el master sin ningún aviso.
+    /// </summary>
+    private void PushMaster(LayoutNode node)
+    {
+        foreach (var sector in SplitNode.Sectors(node))
+            sector.BoardMasterVolume = MasterVolume;
+    }
+
+    /// <summary>
+    /// SOLO: deja sonando únicamente <paramref name="sector"/> — silencia todos los demás del
+    /// MISMO board y le quita el silencio a este. Es el Shift+click del botón de silencio.
+    ///
+    /// Toca SOLO el mute, nunca el volumen: el mute existe aparte justamente para que silenciar y
+    /// volver no te haga perder el nivel (ver SectorNode.IsMuted). Deshacer un solo es
+    /// des-silenciar a mano, y cada sector vuelve a sonar exactamente como estaba.
+    ///
+    /// Alcanza solo a este board: las otras pestañas están pausadas y son otro trabajo; un solo
+    /// que las silenciara te cambiaría boards que ni estás mirando.
+    /// Imágenes y sectores vacíos se saltean (ver SectorNode.HasAudio).
+    /// </summary>
+    public void Solo(SectorNode sector)
+    {
+        foreach (var other in AllSectors)
+        {
+            if (ReferenceEquals(other, sector)) other.IsMuted = false;
+            else if (other.HasAudio) other.IsMuted = true;
+        }
+    }
+
     public BoardViewModel()
     {
         // El board arranca con un único sector vacío ocupando todo. Desde ahí el usuario parte.
@@ -80,7 +130,7 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         // se queda con una sola celda para siempre. Este bug ya pasó una vez; no lo revivas.
         var previousParent = sector.Parent;
 
-        var fresh = new SectorNode();
+        var fresh = new SectorNode { BoardMasterVolume = MasterVolume };
         var split = new SplitNode(orientation, sector, fresh);
 
         if (previousParent is { } parent)
@@ -267,6 +317,7 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
 
         Root = root;
         root.Parent = null;
+        PushMaster(root);
 
         // Un board suspendido que recibe un árbol nuevo lo recibe CONGELADO también: si no,
         // Resume no tendría nada que descongelar y el estado del board diría "en segundo plano"

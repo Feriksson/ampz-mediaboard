@@ -57,10 +57,11 @@ public sealed partial class BoardTab : ObservableObject, IDisposable
     /// <summary>Pestaña en blanco: sin archivo y vacía. "Abrir" la reutiliza en vez de abrir otra.</summary>
     public bool IsBlank => FilePath is null && IsEmpty;
 
-    /// <summary>Pone en la pestaña un board leído de <paramref name="path"/>.</summary>
-    public void Open(LayoutNode root, string path)
+    /// <summary>Pone en la pestaña un board leído de <paramref name="path"/>, con su volumen general.</summary>
+    public void Open(LayoutNode root, string path, int masterVolume = 100)
     {
         Board.ReplaceRoot(root);
+        Board.MasterVolume = masterVolume;
         MarkSaved(path);
     }
 
@@ -75,7 +76,7 @@ public sealed partial class BoardTab : ObservableObject, IDisposable
     public void RefreshModified() =>
         IsModified = FilePath is null
             ? !IsEmpty
-            : _savedSnapshot is not null && BoardStore.Serialize(Board.Root) != _savedSnapshot;
+            : _savedSnapshot is not null && BoardStore.Serialize(Board.Root, Board.MasterVolume) != _savedSnapshot;
 
     /// <summary>Trae la pestaña a primer plano: vista visible y clips reanudados.</summary>
     public void Activate()

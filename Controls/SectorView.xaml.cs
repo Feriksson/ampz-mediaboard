@@ -66,6 +66,18 @@ public partial class SectorView : UserControl
 
         Timeline.SeekRequested += (_, ms) => _node?.SeekTo(ms);
 
+        // Shift+click en el silencio = SOLO (ver BoardViewModel.Solo). Se intercepta en el
+        // Preview y se marca Handled para que el ToggleButton NUNCA vea el click: si lo viera,
+        // primero invertiría el mute de ESTE sector (por el binding TwoWay) y el solo tendría
+        // que pelearse con ese toggle — según el orden, el sector quedaba silenciado justo al
+        // pedir escucharlo a él solo. El click normal (sin Shift) sigue siendo el toggle de siempre.
+        MuteButton.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            if (!Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) || _node is null) return;
+            e.Handled = true;
+            Board?.Solo(_node);
+        };
+
         // Doble click en el sector = copiar el path al portapapeles. Ver OnSectorDoubleClick.
         MouseDoubleClick += OnSectorDoubleClick;
 
