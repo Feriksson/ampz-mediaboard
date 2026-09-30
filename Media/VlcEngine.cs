@@ -119,6 +119,14 @@ public static class VlcEngine
             // Seek PRECISO (no por keyframe). Es lo que hace que los markers de loop caigan
             // donde los pusiste y no ~1s antes. Cuesta un poco más de CPU al saltar: vale la pena.
             "--no-input-fast-seek",
+            // ⚠ Salida de audio DirectSound, NO la de defecto (mmdevice/WASAPI). No es gusto: con
+            // WASAPI el volumen y el mute que le pedís a UN MediaPlayer se aplican a la SESIÓN de
+            // audio del proceso, que es UNA sola para toda la app. Todos los players comparten
+            // el mismo control y gana el último que escribe: medido por readback (DiagLog), un
+            // sector a 80 leía 10 y uno sin mute leía Mute=True. Eso dejaba muertos el volumen
+            // por sector, el SOLO y el volumen general del board. Con DirectSound cada player
+            // tiene su buffer propio y su volumen propio. Regresión: tools/test-audio.ps1.
+            "--aout=directsound",
             // El log de VLC a stderr es ruidosísimo y no lo leemos nunca.
             "--quiet");
     }

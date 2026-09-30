@@ -15,6 +15,7 @@ namespace AmpzMediaBoard.Board;
 public sealed partial class BoardViewModel : ObservableObject, IDisposable
 {
     private readonly DispatcherTimer _tick;
+    private int _diagTicks;
 
     /// <summary>
     /// Se dispara cuando la FORMA del árbol cambió (split o cierre de sector) y la vista tiene
@@ -103,6 +104,12 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         {
             foreach (var sector in SplitNode.Sectors(Root))
                 sector.Tick();
+
+            // Readback del audio para tools/test-audio.ps1, cada ~2 s. Solo con AMPZ_DIAG_LOG:
+            // al usuario no le cuesta ni una comparación de más.
+            if (DiagLog.Enabled && ++_diagTicks % 60 == 0)
+                foreach (var sector in SplitNode.Sectors(Root))
+                    sector.DiagAudioState();
         };
         _tick.Start();
     }

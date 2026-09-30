@@ -245,6 +245,20 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     }
 
     /// <summary>
+    /// Para las pruebas: lo que VLC dice tener AHORA, SIN escribir nada antes. Es lo que
+    /// distingue "cada player tiene su volumen" de "todos comparten uno": la línea <c>audio</c>
+    /// de <see cref="ApplyAudio"/> lee justo después de escribir, así que con un control
+    /// compartido igual devolvería lo recién puesto. Este readback se toma DESPUÉS de que
+    /// todos los sectores aplicaron el suyo — si el control es compartido, todos leen el del
+    /// último. Ver tools/test-audio.ps1. Solo con AMPZ_DIAG_LOG.
+    /// </summary>
+    public void DiagAudioState()
+    {
+        if (!DiagLog.Enabled || Player is null || !IsPlaying) return;
+        DiagLog.Write($"audiostate {Title} req={EffectiveVolume(Volume, BoardMasterVolume)} vlc={Player.Volume} mute={IsMuted} vlcmute={Player.Mute}");
+    }
+
+    /// <summary>
     /// Carga un archivo en el sector, reemplazando lo que hubiera.
     /// <paramref name="startAtMs"/> arranca el clip desde ese punto (lo usa el re-montaje al
     /// reconstruir el layout).
