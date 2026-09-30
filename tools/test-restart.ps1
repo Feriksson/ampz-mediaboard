@@ -4,6 +4,9 @@
 # sin respetar el marker A". Se manifestaba SOLO con la zona de loop por defecto (marker A en 0),
 # que es justo el caso normal al arrastrar un clip a otra celda.
 #
+# Caso 4 (RestartProbe): abrir un board NO carga cada clip dos veces — Remount saltea los clips
+# pendientes y sigue re-montando los que ya arrancaron. Visto fallar sacando el guard de Remount.
+#
 # Necesita un clip corto. Si hay ffmpeg lo genera solo; si no, pasale uno por parametro.
 #
 #   powershell -File tools/test-restart.ps1

@@ -89,13 +89,16 @@ public static class BoardFile
         }
     }
 
-    /// <summary>¿El argumento de línea de comandos es un board que existe? Lo usa el doble click.</summary>
-    public static string? FromCommandLine(string[] args)
-    {
-        var path = args.FirstOrDefault(a =>
+    /// <summary>
+    /// El board que llegó por línea de comandos (el doble click en Explorer pasa UN path), o null.
+    ///
+    /// UNO solo, a propósito: un archivo es una ventana. Las pestañas viven ADENTRO del archivo,
+    /// así que dos archivos a la vez son dos ventanas — dos instancias, que es el caso de uso
+    /// buscado de la multi-instancia. Si llegan varios, se toma el primero válido.
+    /// </summary>
+    public static string? FromCommandLine(string[] args) =>
+        args.FirstOrDefault(a =>
             !a.StartsWith('-') &&
-            Path.GetExtension(a).Equals(Extension, StringComparison.OrdinalIgnoreCase));
-
-        return path is not null && File.Exists(path) ? path : null;
-    }
+            Path.GetExtension(a).Equals(Extension, StringComparison.OrdinalIgnoreCase) &&
+            File.Exists(a));
 }

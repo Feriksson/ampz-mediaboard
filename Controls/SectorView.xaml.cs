@@ -46,8 +46,23 @@ public partial class SectorView : UserControl
     /// </summary>
     private bool _frozen;
 
-    /// <summary>Lo inyecta <c>BoardView</c> al crear la vista. Es quien sabe partir y cerrar sectores.</summary>
-    public BoardViewModel? Board { get; set; }
+    private BoardViewModel? _board;
+
+    /// <summary>
+    /// Lo inyecta <c>BoardView</c> al crear la vista. Es quien sabe partir y cerrar sectores, y
+    /// dice si el sector vive en el PANEL FIJADO (<see cref="BoardViewModel.IsDock"/>): la
+    /// cabecera cambia según eso. ⚠ Se asigna DESPUÉS del DataContext (orden del inicializador
+    /// en BoardView.Build), por eso re-sincroniza la cabecera al llegar.
+    /// </summary>
+    public BoardViewModel? Board
+    {
+        get => _board;
+        set
+        {
+            _board = value;
+            SyncHeader();
+        }
+    }
 
     public SectorView()
     {
@@ -60,11 +75,24 @@ public partial class SectorView : UserControl
         ClearButton.Click += (_, _) => _node?.Unload();
         CopyPathButton.Click += (_, _) => CopyPathToClipboard();
         CloseButton.Click += (_, _) => { if (_node is not null) Board?.Close(_node); };
+        PinButton.Click += (_, _) => { if (_node is not null) Board?.RequestPin(_node); };
         PlayButton.Click += (_, _) => _node?.TogglePlay();
         BrowseButton.Click += (_, _) => BrowseForMedia();
         RelinkButton.Click += (_, _) => BrowseForMedia();
 
         Timeline.SeekRequested += (_, ms) => _node?.SeekTo(ms);
+
+        // Shift+click en el silencio = SOLO (ver BoardViewModel.Solo). Se intercepta en el
+        // Preview y se marca Handled para que el ToggleButton NUNCA vea el click: si lo viera,
+        // primero invertiría el mute de ESTE sector (por el binding TwoWay) y el solo tendría
+        // que pelearse con ese toggle — según el orden, el sector quedaba silenciado justo al
+        // pedir escucharlo a él solo. El click normal (sin Shift) sigue siendo el toggle de siempre.
+        MuteButton.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            if (!Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) || _node is null) return;
+            e.Handled = true;
+            Board?.RequestSolo(_node);
+        };
 
         // Doble click en el sector = copiar el path al portapapeles. Ver OnSectorDoubleClick.
         MouseDoubleClick += OnSectorDoubleClick;
@@ -78,6 +106,11 @@ public partial class SectorView : UserControl
         // (el caso del board restaurado desde disco: el clip se preparó antes de que la vista
         // existiera).
         Video.Loaded += (_, _) => StartWhenSurfaceReady();
+
+        // Y también cuando la superficie se VUELVE visible: un board abierto en una pestaña de
+        // segundo plano (o un sector congelado por un arrastre) tiene sus clips pendientes
+        // esperando justo este momento. Ver StartWhenSurfaceReady.
+        Video.IsVisibleChanged += (_, e) => { if ((bool)e.NewValue) StartWhenSurfaceReady(); };
 
         // La cabecera ARMA el arrastre, pero el movimiento se escucha en el SECTOR ENTERO.
         // ⚠ No es un detalle: WPF no captura el mouse al apretar, así que los eventos de
@@ -262,6 +295,7 @@ public partial class SectorView : UserControl
         // que perdiste, y con ella en el portapapeles la pegás en el Explorer para ir a buscarla.
         CopyPathButton.Visibility = movable ? Visibility.Visible : Visibility.Collapsed;
         Header.Cursor = movable ? Cursors.SizeAll : Cursors.Arrow;
+        SyncHeader();
         EmptyHint.Visibility = kind == MediaKind.None && missing is null
             ? Visibility.Visible
             : Visibility.Collapsed;
@@ -273,6 +307,41 @@ public partial class SectorView : UserControl
         }
 
         StartWhenSurfaceReady();
+    }
+
+    /// <summary>
+    /// La cabecera según DÓNDE vive el sector:
+    ///  · en una pestaña: 📌 normal ("fijar"), solo si hay algo que fijar;
+    ///  · en el panel fijado: 📌 APRETADO ("desfijar", siempre visible: aun vacío, sacarlo del
+    ///    panel es la salida), y sin los botones de partir — el panel es una pila vertical que
+    ///    se reparte sola, no un layout libre.
+    /// No toca el video: es cabecera pura, WPF.
+    /// </summary>
+    private void SyncHeader()
+    {
+        var docked = _board?.IsDock == true;
+        var movable = _node is { HasMedia: true } or { IsMissing: true };
+
+        SplitVerticalButton.Visibility = docked ? Visibility.Collapsed : Visibility.Visible;
+        SplitHorizontalButton.Visibility = docked ? Visibility.Collapsed : Visibility.Visible;
+
+        PinButton.Visibility = docked || movable ? Visibility.Visible : Visibility.Collapsed;
+        PinButton.ToolTip = docked
+            ? "Desfijar: devolver el media a la pestaña activa"
+            : "Fijar en el panel lateral: queda a la vista en todas las pestañas";
+        System.Windows.Automation.AutomationProperties.SetName(PinButton, docked ? "Desfijar sector" : "Fijar sector");
+        PinButton.Background = docked ? PinnedFill : Brushes.Transparent;
+        PinButton.SetResourceReference(ForegroundProperty, docked ? "AccentBrush" : "DimTextBrush");
+    }
+
+    /// <summary>Fondo del 📌 "apretado": el acento, tenue, como el velo de drop.</summary>
+    private static readonly Brush PinnedFill = CreatePinnedFill();
+
+    private static Brush CreatePinnedFill()
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(0x40, 0x4C, 0xC2, 0xFF));
+        brush.Freeze();
+        return brush;
     }
 
     /// <summary>
@@ -443,18 +512,59 @@ public partial class SectorView : UserControl
     /// VideoView en Visible, y su ventana nativa se posiciona durante el layout. Arrancar el
     /// Play() en la misma vuelta lo agarraría con tamaño cero. Una vuelta después del layout,
     /// la superficie ya está donde tiene que estar.
+    ///
+    /// ⚠ "Cargada" NO alcanza: hace falta que esté VISIBLE. Una pestaña de segundo plano tiene
+    /// su BoardView colapsada, y sus VideoView pueden estar cargados igual — arrancar ahí es
+    /// darle a VLC una ventana escondida y de tamaño cero, y de paso poner a decodificar una
+    /// pestaña que nadie mira. Se espera al IsVisibleChanged de cuando la pestaña se activa
+    /// (enganchado en el constructor). Mismo invariante que el bug #1: Play() solo con una
+    /// superficie de verdad.
+    ///
+    /// ⚠ Y hace falta que la ventana esté LIBRE: se espera a que terminen los Stop() en curso
+    /// (<see cref="VlcEngine.WhenReleased"/>). Bug reportado: soltar un clip sobre un sector YA
+    /// OCUPADO abría una ventana propia de VLC con el clip NUEVO, flotando fuera de la app. El
+    /// player nuevo SÍ tenía el HWND bien puesto (medido con el DiagLog: la línea <c>play</c>
+    /// muestra el mismo HWND que usaba el clip viejo). El problema es que libvlc lleva una lista
+    /// de HWND "ocupados" por un vout, y si le das uno ocupado NO lo comparte: avisa "HWND is
+    /// busy" y cae a su ventana top-level propia — el bug #1 por otra puerta. Y estaba ocupado
+    /// porque desde el cierre rápido (VlcEngine.Release) el Stop() del player viejo corre en
+    /// otro hilo y todavía no había soltado su vout cuando el nuevo arrancaba. Antes, el Stop
+    /// sincrónico lo soltaba siempre primero.
+    /// Se espera acá y no con un Stop sincrónico en Load: así la UI sigue sin bloquearse (el
+    /// objetivo del cierre rápido), y cubre TODOS los caminos que recargan un sector sobre su
+    /// propia ventana (soltar, elegir, pegar, intercambiar, fijar), no solo el drop.
+    /// Se esperan TODAS las liberaciones y no solo la del player viejo de ESTE sector: son de
+    /// 100-500ms y a lo sumo retrasan un arranque ese rato, pero cubren también que Windows
+    /// reuse el valor numérico de un HWND destruido por un Rebuild mientras su vout se detiene.
+    /// Con techo (<see cref="VlcEngine.ReleaseTimeout"/>): si VLC quedó trabado deteniendo un
+    /// player, esperar más no lo destraba, y un sector que no arranca nunca es peor.
+    /// Regresión: tools/test-replace.ps1.
     /// </summary>
     private void StartWhenSurfaceReady()
     {
-        if (_node?.Player is null || !Video.IsLoaded) return;
+        if (_node?.Player is null || !Video.IsLoaded || !Video.IsVisible) return;
 
         var node = _node;
-        Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        // Action explícito: async void a propósito, para que una excepción de StartPending llegue
+        // al Dispatcher como antes y no quede tragada en una Task que nadie mira.
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, (Action)(async () =>
         {
+            // En bucle: mientras esperábamos pudo empezar OTRA liberación (un segundo drop
+            // encima), y esa también puede estar ocupando la ventana.
+            var deadline = Environment.TickCount64 + (long)VlcEngine.ReleaseTimeout.TotalMilliseconds;
+            while (VlcEngine.WhenReleased() is { IsCompleted: false } released &&
+                   Environment.TickCount64 < deadline)
+            {
+                DiagLog.Write($"playwait {node.Title}");
+                var left = deadline - Environment.TickCount64;
+                await Task.WhenAny(released, Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1, left))));
+            }
+
             // El sector pudo haber cambiado de contenido mientras esperábamos la vuelta del
-            // Dispatcher (otro drop encima, o un cierre). Si ya no es el mismo nodo, no tocamos nada.
-            if (ReferenceEquals(_node, node)) node.StartPending();
-        });
+            // Dispatcher (otro drop encima, o un cierre), o la pestaña pudo volver a segundo
+            // plano. En cualquiera de los dos casos, no tocamos nada.
+            if (ReferenceEquals(_node, node) && Video.IsVisible) node.StartPending();
+        }));
     }
 
     private void SyncTimeLabel()

@@ -15,6 +15,7 @@ namespace AmpzMediaBoard.Board;
 public sealed partial class BoardViewModel : ObservableObject, IDisposable
 {
     private readonly DispatcherTimer _tick;
+    private int _diagTicks;
 
     /// <summary>
     /// Se dispara cuando la FORMA del árbol cambió (split o cierre de sector) y la vista tiene
@@ -38,6 +39,95 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     [ObservableProperty] private LayoutNode _root;
     [ObservableProperty] private SectorNode? _selected;
 
+    /// <summary>
+    /// Volumen general del board, 0..100. ESCALA el de cada sector, nunca lo pisa: ver
+    /// <see cref="SectorNode.EffectiveVolume"/>. Es POR BOARD (cada pestaña tiene el suyo) y se
+    /// persiste en el `.mboard`, porque es parte de cómo suena ESE board.
+    /// </summary>
+    [ObservableProperty] private int _masterVolume = 100;
+
+    /// <summary>
+    /// El master se EMPUJA a cada sector (ver <see cref="SectorNode.BoardMasterVolume"/> para
+    /// por qué empujado y no consultado). Cambiarlo re-aplica el audio de todo el board en el acto.
+    /// </summary>
+    partial void OnMasterVolumeChanged(int value)
+    {
+        var clamped = Math.Clamp(value, 0, 100);
+        if (clamped != value) { MasterVolume = clamped; return; }
+        PushMaster(Root);
+    }
+
+    /// <summary>
+    /// Lleva el master a todos los sectores de un (sub)árbol. Hace falta en CADA punto donde
+    /// entra un sector nuevo al board (partir, reemplazar el árbol): un sector que no lo recibe
+    /// sonaría al 100% de su volumen, ignorando el master sin ningún aviso.
+    /// </summary>
+    private void PushMaster(LayoutNode node)
+    {
+        foreach (var sector in SplitNode.Sectors(node))
+            sector.BoardMasterVolume = MasterVolume;
+    }
+
+    /// <summary>
+    /// SOLO: deja sonando únicamente <paramref name="sector"/> — silencia todos los demás del
+    /// MISMO board y le quita el silencio a este. Es el Shift+click del botón de silencio.
+    ///
+    /// Toca SOLO el mute, nunca el volumen: el mute existe aparte justamente para que silenciar y
+    /// volver no te haga perder el nivel (ver SectorNode.IsMuted). Deshacer un solo es
+    /// des-silenciar a mano, y cada sector vuelve a sonar exactamente como estaba.
+    ///
+    /// Alcanza solo a este board: las otras pestañas están pausadas y son otro trabajo; un solo
+    /// que las silenciara te cambiaría boards que ni estás mirando. En la app el alcance real es
+    /// la pestaña activa MÁS el panel fijado (ver <see cref="RequestSolo"/> y PinnedDock.Solo):
+    /// este método es el alcance de un board suelto.
+    /// Imágenes y sectores vacíos se saltean (ver SectorNode.HasAudio).
+    /// </summary>
+    public void Solo(SectorNode sector) => SoloAmong(sector, AllSectors);
+
+    /// <summary>
+    /// La regla del solo sobre un ALCANCE cualquiera. Existe aparte porque con el panel fijado
+    /// el alcance deja de ser "este board": es la pestaña activa MÁS el panel (ver
+    /// <see cref="PinnedDock.Solo"/>). Una sola regla para los dos alcances: si cada uno la
+    /// reescribiera, tarde o temprano uno se olvidaría de saltear imágenes y vacíos.
+    /// </summary>
+    public static void SoloAmong(SectorNode sector, IEnumerable<SectorNode> scope)
+    {
+        foreach (var other in scope)
+        {
+            if (ReferenceEquals(other, sector)) other.IsMuted = false;
+            else if (other.HasAudio) other.IsMuted = true;
+        }
+    }
+
+    /// <summary>
+    /// Pedido de SOLO desde la vista (Shift+click en el silencio). Quien coordina varios boards
+    /// (MainWindow: pestaña activa + panel fijado) se suscribe y decide el alcance; sin
+    /// suscriptor, el solo es de este board — el comportamiento de siempre.
+    /// </summary>
+    public event Action<SectorNode>? SoloRequested;
+
+    public void RequestSolo(SectorNode sector)
+    {
+        if (SoloRequested is { } handler) handler(sector);
+        else Solo(sector);
+    }
+
+    /// <summary>
+    /// Pedido de FIJAR (o desfijar, si este es el panel) un sector: el botón 📌 de su cabecera.
+    /// El board no puede resolverlo solo porque la operación cruza boards (pestaña ↔ panel):
+    /// la resuelve quien los tiene a los dos. Ver <see cref="PinnedDock"/>.
+    /// </summary>
+    public event Action<BoardViewModel, SectorNode>? PinRequested;
+
+    public void RequestPin(SectorNode sector) => PinRequested?.Invoke(this, sector);
+
+    /// <summary>
+    /// Este board es el PANEL FIJADO y no una pestaña. La vista lo lee para mostrar el 📌
+    /// apretado y esconder los botones de partir: el panel es una pila vertical, no un layout
+    /// libre (ver <see cref="PinnedDock"/>).
+    /// </summary>
+    public bool IsDock { get; init; }
+
     public BoardViewModel()
     {
         // El board arranca con un único sector vacío ocupando todo. Desde ahí el usuario parte.
@@ -53,6 +143,12 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         {
             foreach (var sector in SplitNode.Sectors(Root))
                 sector.Tick();
+
+            // Readback del audio para tools/test-audio.ps1, cada ~2 s. Solo con AMPZ_DIAG_LOG:
+            // al usuario no le cuesta ni una comparación de más.
+            if (DiagLog.Enabled && ++_diagTicks % 60 == 0)
+                foreach (var sector in SplitNode.Sectors(Root))
+                    sector.DiagAudioState();
         };
         _tick.Start();
     }
@@ -61,10 +157,76 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
 
     public void Select(SectorNode sector)
     {
+        _lastSelected = sector;
         if (ReferenceEquals(Selected, sector)) return;
         if (Selected is not null) Selected.IsSelected = false;
         Selected = sector;
         sector.IsSelected = true;
+    }
+
+    /// <summary>
+    /// El último sector que se seleccionó acá, aunque la selección se haya ido a OTRO board. Ver
+    /// <see cref="ClearSelection"/>.
+    /// </summary>
+    private SectorNode? _lastSelected;
+
+    /// <summary>
+    /// Deselecciona sin elegir otro. Hay UNA sola selección en toda la app: seleccionar un sector
+    /// del panel fijado deselecciona el de la pestaña y viceversa — si no, Espacio o A/B no
+    /// sabrían a cuál de los dos le hablan.
+    ///
+    /// ⚠ Recuerda cuál era (<see cref="_lastSelected"/>). Desfijar se aprieta EN el panel, y ese
+    /// click ya se llevó la selección de la pestaña; sin memoria, "volver junto al sector que
+    /// tenías seleccionado" no tendría a qué volver.
+    /// </summary>
+    public void ClearSelection()
+    {
+        if (Selected is null) return;
+        Selected.IsSelected = false;
+        Selected = null;
+    }
+
+    /// <summary>
+    /// Vuelve a seleccionar algo si la selección se había ido a otro board: el último que lo
+    /// estuvo (si sigue en el árbol) o el primero. Lo usa el cambio de pestaña.
+    /// </summary>
+    public void EnsureSelection()
+    {
+        if (Selected is not null) return;
+        Select(_lastSelected is { } last && AllSectors.Contains(last) ? last : AllSectors.First());
+    }
+
+    /// <summary>
+    /// Dónde cae un clip que VUELVE del panel fijado a este board:
+    ///  · el sector seleccionado (o el último que lo estuvo) si está VACÍO → ese mismo;
+    ///  · si tiene algo → se parte en dos y el clip va a la mitad nueva (nunca se pisa nada);
+    ///  · sin ninguno → se parte el board ENTERO (la raíz), salvo que sea un único sector vacío.
+    /// Devuelve el sector destino, ya seleccionado.
+    /// </summary>
+    public SectorNode PrepareReturnTarget()
+    {
+        var anchor = Selected ?? (_lastSelected is { } last && AllSectors.Contains(last) ? last : null);
+        if (anchor is null && Root is SectorNode single) anchor = single;
+
+        if (anchor is not null)
+        {
+            if (!anchor.HasMedia && !anchor.IsMissing)
+            {
+                Select(anchor);
+                return anchor;
+            }
+
+            Split(anchor, SplitOrientation.Horizontal);
+            return Selected!;
+        }
+
+        // Nada seleccionado y la raíz es un split: la mitad nueva ocupa medio board.
+        var fresh = new SectorNode { BoardMasterVolume = MasterVolume };
+        var split = new SplitNode(SplitOrientation.Horizontal, Root, fresh) { Parent = null };
+        Root = split;
+        Select(fresh);
+        LayoutChanged?.Invoke();
+        return fresh;
     }
 
     /// <summary>
@@ -80,7 +242,7 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         // se queda con una sola celda para siempre. Este bug ya pasó una vez; no lo revivas.
         var previousParent = sector.Parent;
 
-        var fresh = new SectorNode();
+        var fresh = new SectorNode { BoardMasterVolume = MasterVolume };
         var split = new SplitNode(orientation, sector, fresh);
 
         if (previousParent is { } parent)
@@ -207,24 +369,92 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     /// <summary>Termina el arrastre: descongela y devuelve a Play lo que estaba reproduciendo.</summary>
     public void EndInteractiveResize()
     {
+        // Si la pestaña se fue a segundo plano EN MEDIO del arrastre (Ctrl+Tab con el mouse
+        // apretado), el DragCompleted llega con el board suspendido. Descongelar acá haría
+        // arrancar clips en una pestaña que nadie ve; los deja congelados y Resume los devuelve
+        // al volver — con el _resumeAfterThaw que anotó el arrastre, que es el correcto.
+        if (IsSuspended) return;
         foreach (var sector in AllSectors) sector.Thaw();
+    }
+
+    /// <summary>
+    /// El board está en una pestaña de SEGUNDO PLANO: clips pausados y latido apagado.
+    /// Ver <see cref="Suspend"/>.
+    /// </summary>
+    public bool IsSuspended { get; private set; }
+
+    /// <summary>
+    /// Manda el board a segundo plano (su pestaña dejó de ser la activa).
+    ///
+    /// Es el MISMO congelado que el del arrastre de splitter (<see cref="SectorNode.Freeze"/>)
+    /// más el latido apagado:
+    /// - pausar corta la decodificación: una pestaña que no se ve no puede quemar CPU;
+    /// - el timer se DETIENE, no solo se saltea: con ocho pestañas serían ocho latidos de 30 Hz
+    ///   compitiendo en la cola del Dispatcher por nada — justo el jitter que el latido único
+    ///   existe para evitar (ver el comentario de la clase).
+    ///
+    /// ⚠ NO se reconstruye ni se libera nada. Los VideoView siguen vivos (colapsados, ver
+    /// BoardView.SetSuspended) y los MediaPlayer siguen enganchados a su HWND, así que volver a
+    /// la pestaña es despausar — sin Remount, sin reabrir archivos, sin frames negros.
+    /// </summary>
+    public void Suspend()
+    {
+        if (IsSuspended) return;
+        IsSuspended = true;
+        _tick.Stop();
+        foreach (var sector in AllSectors) sector.Freeze();
+    }
+
+    /// <summary>
+    /// Vuelve a primer plano. Reanuda SOLO lo que estaba reproduciendo al suspender (la misma
+    /// regla que el arrastre de splitter): un clip que pausaste a mano no arranca porque
+    /// cambiaste de pestaña.
+    /// </summary>
+    public void Resume()
+    {
+        if (!IsSuspended) return;
+        IsSuspended = false;
+        foreach (var sector in AllSectors) sector.Thaw();
+        _tick.Start();
     }
 
     /// <summary>Reemplaza el board entero (lo usa la carga desde disco).</summary>
     public void ReplaceRoot(LayoutNode root)
     {
+        // Dispose NO bloquea: cada sector desengancha su player acá y lo detiene en otro hilo,
+        // todos en paralelo (ver VlcEngine.Release). "Nuevo"/"Abrir" sobre un board con seis
+        // clips ya no congela la ventana medio segundo por clip.
         foreach (var sector in SplitNode.Sectors(Root))
             sector.Dispose();
 
         Root = root;
         root.Parent = null;
+        PushMaster(root);
+
+        // Un board suspendido que recibe un árbol nuevo lo recibe CONGELADO también: si no,
+        // Resume no tendría nada que descongelar y el estado del board diría "en segundo plano"
+        // con sectores que no lo saben.
+        if (IsSuspended)
+            foreach (var sector in SplitNode.Sectors(root)) sector.Freeze();
+
         Select(SplitNode.Sectors(root).First());
         LayoutChanged?.Invoke();
     }
 
+    /// <summary>
+    /// Suelta todos los sectores. NO espera a que los reproductores terminen de detenerse: eso
+    /// corre en otros hilos (VlcEngine.Release). Quien necesite esperarlo —el cierre de la app,
+    /// antes de liberar el runtime— usa <c>VlcEngine.WhenReleased()</c>.
+    /// </summary>
     public void Dispose()
     {
         _tick.Stop();
+        // Un board liberado (pestaña cerrada) ya no tiene vista que reconstruir: soltar los
+        // suscriptores evita que la BoardView muerta quede colgada de este objeto.
+        LayoutChanged = null;
+        RatiosChanged = null;
+        SoloRequested = null;
+        PinRequested = null;
         foreach (var sector in SplitNode.Sectors(Root))
             sector.Dispose();
     }

@@ -88,6 +88,17 @@ public static class VlcEngine
         thread.Start();
     }
 
+    /// <summary>
+    /// Crea un Media para <paramref name="path"/>. TODA apertura de archivo de la app pasa por
+    /// acá (carga, re-montaje, relanzamiento del loop), y eso es lo que la hace MEDIBLE: cada
+    /// una deja una línea en el <see cref="DiagLog"/> (apagado salvo en las pruebas).
+    /// </summary>
+    public static LibVLCSharp.Shared.Media NewMedia(string path)
+    {
+        DiagLog.Write($"open {path}");
+        return new LibVLCSharp.Shared.Media(Instance, new Uri(path));
+    }
+
     private static LibVLC Create()
     {
         // Core.Initialize() localiza libvlc.dll + el directorio de plugins. El paquete
@@ -108,20 +119,111 @@ public static class VlcEngine
             // Seek PRECISO (no por keyframe). Es lo que hace que los markers de loop caigan
             // donde los pusiste y no ~1s antes. Cuesta un poco más de CPU al saltar: vale la pena.
             "--no-input-fast-seek",
+            // ⚠ Salida de audio DirectSound, NO la de defecto (mmdevice/WASAPI). No es gusto: con
+            // WASAPI el volumen y el mute que le pedís a UN MediaPlayer se aplican a la SESIÓN de
+            // audio del proceso, que es UNA sola para toda la app. Todos los players comparten
+            // el mismo control y gana el último que escribe: medido por readback (DiagLog), un
+            // sector a 80 leía 10 y uno sin mute leía Mute=True. Eso dejaba muertos el volumen
+            // por sector, el SOLO y el volumen general del board. Con DirectSound cada player
+            // tiene su buffer propio y su volumen propio. Regresión: tools/test-audio.ps1.
+            "--aout=directsound",
             // El log de VLC a stderr es ruidosísimo y no lo leemos nunca.
             "--quiet");
     }
 
-    /// <summary>Se llama en App.OnExit. Antes hay que haber liberado todos los MediaPlayer.</summary>
+    /// <summary>
+    /// Liberaciones de reproductores EN CURSO (Stop + Dispose corriendo en otro hilo). Ver
+    /// <see cref="Release"/>. Tiene su propio lock y NO usa <see cref="Gate"/> a propósito:
+    /// Gate lo puede tener tomado el precalentamiento hasta ~17s en frío, y liberar un player
+    /// (que pasa en el hilo de UI) no puede quedar esperando detrás de eso.
+    /// </summary>
+    private static readonly List<Task> Releases = [];
+
+    private static readonly Lock ReleasesGate = new();
+
+    /// <summary>
+    /// Cuánto espera <see cref="Shutdown"/> a que terminen las liberaciones antes de rendirse.
+    /// Un Stop() normal tarda 100-500ms; si después de esto sigue colgado, VLC está trabado y
+    /// esperar más no lo destraba — solo deja el proceso zombi con la ventana ya cerrada.
+    /// </summary>
+    public static readonly TimeSpan ReleaseTimeout = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// Detiene y libera un reproductor FUERA del hilo de UI, en paralelo con cualquier otro.
+    ///
+    /// Existe por un bug reportado: cerrar un board con varios videos tardaba una eternidad y
+    /// se veía cerrar "video por video". <c>MediaPlayer.Stop()</c> es BLOQUEANTE en libvlc —
+    /// espera a que terminen el decoder, la salida de video y la de audio (WASAPI), ~100-500ms
+    /// por player — y se hacía uno atrás del otro en el hilo de UI. Con N sectores eso es N
+    /// veces el costo, con la ventana congelada a la vista. En paralelo el total es el del
+    /// player MÁS LENTO, y encima no lo paga la UI.
+    ///
+    /// ⚠ Precondición del que llama: el player YA tiene que estar desenganchado de su VideoView
+    /// (<c>SectorNode.Unload</c> pone <c>Player = null</c> antes de llamar acá). El hilo de
+    /// fondo toca SOLO el objeto que recibe, nunca el nodo: el nodo puede volver a cargarse
+    /// otro clip en el hilo de UI mientras el player viejo todavía se está deteniendo.
+    ///
+    /// ⚠ Consecuencia que costó un bug (ventana suelta de VLC al reemplazar un clip): hasta que
+    /// este Stop() termina, el vout del player viejo SIGUE siendo dueño de su HWND, y libvlc NO
+    /// comparte un HWND ocupado ("drawable: HWND 0x… is busy") — el player nuevo que arranque
+    /// sobre esa misma ventana cae a una ventana propia. Por eso ningún Play() arranca mientras
+    /// haya liberaciones en curso: lo espera <c>SectorView.StartWhenSurfaceReady</c> vía
+    /// <see cref="WhenReleased"/>.
+    ///
+    /// Hilo dedicado (LongRunning) y no del pool: son llamadas nativas que bloquean, y con 8
+    /// sectores ocuparían el pool entero justo cuando el board nuevo quiere arrancar.
+    /// </summary>
+    public static void Release(MediaPlayer player)
+    {
+        var task = Task.Factory.StartNew(() =>
+        {
+            // Stop() antes de Dispose(): soltar el player mientras decodifica deja el hilo de
+            // VLC trabajando sobre memoria liberada. Cada paso con su try: si el Stop falla,
+            // el Dispose se intenta igual; y nada de esto puede tirar abajo la app.
+            try { player.Stop(); } catch { /* ver arriba */ }
+            try { player.Dispose(); } catch { /* ver arriba */ }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        lock (ReleasesGate)
+        {
+            // Se poda al agregar: la lista solo tiene que recordar lo que TODAVÍA corre.
+            Releases.RemoveAll(t => t.IsCompleted);
+            Releases.Add(task);
+        }
+    }
+
+    /// <summary>Se completa cuando terminaron todas las liberaciones pedidas hasta ahora.</summary>
+    public static Task WhenReleased()
+    {
+        lock (ReleasesGate)
+        {
+            Releases.RemoveAll(t => t.IsCompleted);
+            return Releases.Count == 0 ? Task.CompletedTask : Task.WhenAll(Releases.ToArray());
+        }
+    }
+
+    /// <summary>
+    /// Se llama en App.OnExit. Espera (con techo) a que terminen las liberaciones en curso y
+    /// recién ahí suelta el runtime.
+    ///
+    /// ⚠ El orden NO es negociable: <c>LibVLC.Dispose()</c> con players todavía deteniéndose en
+    /// otro hilo es liberar el runtime debajo de hilos nativos que lo están usando. Si la espera
+    /// vence, NO se libera — el proceso se está muriendo igual y el SO recupera todo; un crash
+    /// al salir o un proceso colgado son los dos peores que un runtime sin liberar.
+    /// </summary>
     public static void Shutdown()
     {
+        bool drained;
+        try { drained = WhenReleased().Wait(ReleaseTimeout); }
+        catch { drained = true; } // Las tareas tragan sus errores; esto es solo por las dudas.
+
         lock (Gate)
         {
             // Se marca ANTES de soltar el lock: si el hilo de precalentamiento está esperando
             // acá atrás, tiene que ver el apagado y NO crear un runtime nuevo que nadie
             // liberaría. Sin esto, cerrar la app en el primer segundo deja libvlc colgado.
             _shuttingDown = true;
-            _libVlc?.Dispose();
+            if (drained) _libVlc?.Dispose();
             _libVlc = null;
         }
     }

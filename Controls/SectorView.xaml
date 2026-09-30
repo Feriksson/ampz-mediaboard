@@ -39,8 +39,8 @@
                          sector. Se eligio la cabecera y no el area de video porque esa area es
                          un HWND hosteado: arrastrar desde ahi es poco confiable. Ademas evita
                          que un click cualquiera sobre el video se interprete como arrastre. -->
-                    <!-- El margen deja lugar a los SEIS botones de la derecha (22px cada uno). -->
-                    <StackPanel Orientation="Horizontal" Margin="0,0,142,0">
+                    <!-- El margen deja lugar a los SIETE botones de la derecha (22px cada uno). -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,164,0">
                         <!-- Asa visible. Sin una pista de que la cabecera se arrastra, la
                              funcionalidad existe pero nadie la encuentra: una feature invisible
                              es una feature que no está. Solo aparece con media cargado, porque
@@ -85,6 +85,35 @@
                         <Button x:Name="ClearButton" Content="&#x23CF;" FontFamily="Segoe UI Symbol"
                                 ToolTip="Desvincular el media (el sector queda vacío)"
                                 Style="{DynamicResource IconButton}" />
+                        <!-- ══ Fijar en el panel lateral ══
+                             Manda el media al PANEL FIJADO, que queda a la vista en todas las
+                             pestañas (ver Board/PinnedDock). En un sector del panel el mismo botón
+                             aparece APRETADO y desfija. El tooltip, el nombre accesible y el
+                             "apretado" los pone SectorView.SyncHeader según dónde vive el sector.
+                             Se colapsa sin media, igual que copiar el path: un sector vacío no tiene
+                             nada que fijar.
+                             ⚠ U+1F4CC VERIFICADO contra "Segoe UI Symbol" con GlyphTypeface antes
+                             de ponerlo: en "Segoe UI" NO existe y saldría TOFU (mismo error que ya se
+                             pagó con el glifo de carpeta). Template propio y no el IconButton: ese
+                             pinta el fondo fijo en su plantilla y el estado "apretado" necesita
+                             poder cambiarlo. -->
+                        <Button x:Name="PinButton" Content="&#x1F4CC;" FontFamily="Segoe UI Symbol"
+                                Width="20" Height="18" Margin="2,0,0,0" FontSize="10" Cursor="Hand"
+                                Background="Transparent" Foreground="{DynamicResource DimTextBrush}"
+                                AutomationProperties.AutomationId="PinButton">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bg" Background="{TemplateBinding Background}" CornerRadius="3">
+                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bg" Property="Background" Value="#3A3A48" />
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
                         <Button x:Name="CloseButton" Content="&#x2715;" ToolTip="Cerrar el sector"
                                 Style="{DynamicResource IconButton}" />
                     </StackPanel>
@@ -217,12 +246,12 @@
                     <ToggleButton x:Name="MuteButton" Margin="6,0,0,0" Width="30"
                                   IsChecked="{Binding IsMuted, Mode=TwoWay}"
                                   Style="{DynamicResource MuteToggle}"
-                                  ToolTip="Silenciar este sector" />
+                                  ToolTip="Silenciar · Shift+click: dejar solo este" />
                     <Slider x:Name="VolumeSlider" Width="66" Margin="4,0,0,0" VerticalAlignment="Center"
                             Minimum="0" Maximum="100" SmallChange="5" LargeChange="10"
                             Value="{Binding Volume, Mode=TwoWay}"
                             Style="{DynamicResource VolumeSlider}"
-                            ToolTip="Volumen de este sector" />
+                            ToolTip="Volumen de este sector (el volumen general del board lo escala)" />
 
                     <TextBlock x:Name="TimeLabel" VerticalAlignment="Center" Margin="10,0,0,0"
                                FontFamily="Consolas" FontSize="11"

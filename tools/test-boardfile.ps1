@@ -3,9 +3,16 @@
 #  2. apertura por argumento de linea de comandos (= lo que hace el doble click)
 #  3. que el titulo de la ventana refleje el board abierto
 
-$exe   = 'C:\Users\ampz\Desktop\Repos personales\ampz-mediaboard -dev\bin\Debug\net10.0-windows\AmpzMediaBoard.exe'
-$clip  = 'C:\Users\ampz\AppData\Local\Temp\claude\C--Users-ampz-Desktop-Repos-personales-ampz-mediaboard--dev\0dbfb6b6-ec30-4f72-8818-d75d565ae8a0\scratchpad\test-clip.gif'
-$board = 'C:\Users\ampz\AppData\Local\Temp\claude\C--Users-ampz-Desktop-Repos-personales-ampz-mediaboard--dev\0dbfb6b6-ec30-4f72-8818-d75d565ae8a0\scratchpad\mi-board-de-prueba.mboard'
+# Rutas DERIVADAS del script, nunca tipeadas: la version anterior apuntaba a la carpeta vieja del
+# repo y a un clip en el scratchpad de una sesion ya borrada, y fallaba en cualquier maquina.
+$repo  = Split-Path -Parent $PSScriptRoot
+$exe   = Join-Path $repo 'bin\Debug\net10.0-windows\AmpzMediaBoard.exe'
+$clip  = Join-Path $env:TEMP 'ampz-test-clip.gif'
+if (-not (Test-Path $clip)) {
+    if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { [Console]::WriteLine('No hay ffmpeg para generar el clip.'); exit 1 }
+    ffmpeg -v error -y -f lavfi -i 'testsrc=size=160x120:rate=10' -t 2 $clip
+}
+$board = Join-Path $env:TEMP 'mi-board-de-prueba.mboard'
 
 Stop-Process -Name AmpzMediaBoard -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 800

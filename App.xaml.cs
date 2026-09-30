@@ -33,6 +33,7 @@ public partial class App : Application
         base.OnStartup(e);
 
         // Doble click en un .mboard desde Explorer: el shell nos pasa el path como argumento.
+        // Un archivo = una ventana (sus pestañas vienen adentro).
         var startupFile = BoardFile.FromCommandLine(e.Args);
 
         // La extensión se registra sola la primera vez, para que el doble click funcione sin que

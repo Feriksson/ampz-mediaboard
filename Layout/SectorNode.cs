@@ -169,6 +169,56 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
     partial void OnIsMutedChanged(bool value) => ApplyAudio();
 
+    private int _boardMasterVolume = 100;
+
+    /// <summary>
+    /// Volumen general del BOARD al que pertenece este sector, 0..100. NO es del sector: lo
+    /// EMPUJA <c>BoardViewModel</c> (al cambiar el master, al partir, al reemplazar el árbol).
+    ///
+    /// ¿Por qué empujado y no un callback al board? Porque el nodo existe SIN board: BoardStore
+    /// arma el árbol entero (y hasta carga los clips) antes de que ningún BoardViewModel lo
+    /// adopte, y las sondas lo usan suelto. Un callback obligaría a un "board nulo" en cada una
+    /// de esas rutas; un valor empujado arranca en 100 (neutro) y el nodo sigue siendo
+    /// autosuficiente. Además deja la dependencia en un solo sentido: board → nodo.
+    ///
+    /// ⚠ NO viaja en <see cref="MediaSnapshot"/> ni se persiste por sector: es del board. Al
+    /// intercambiar clips entre sectores, cada nodo conserva el master de SU board.
+    /// </summary>
+    public int BoardMasterVolume
+    {
+        get => _boardMasterVolume;
+        set
+        {
+            var clamped = Math.Clamp(value, 0, 100);
+            if (_boardMasterVolume == clamped) return;
+            _boardMasterVolume = clamped;
+            ApplyAudio();
+        }
+    }
+
+    /// <summary>
+    /// Volumen que recibe VLC: el del sector ESCALADO por el master del board.
+    ///
+    /// Escala y no pisa (decisión del usuario): bajar el master a la mitad baja TODO a la mitad
+    /// y conserva la MEZCLA — el sector que tenías a 80 contra otro a 20 sigue sonando 4 veces
+    /// más fuerte. Pisar los volúmenes con el master borraría ese balance que te costó armar.
+    /// Función pura y estática para poder probarla sin VLC (tools/BoardProbe).
+    /// </summary>
+    public static int EffectiveVolume(int sectorVolume, int masterVolume) =>
+        (int)Math.Round(
+            Math.Clamp(sectorVolume, 0, 100) * Math.Clamp(masterVolume, 0, 100) / 100.0,
+            MidpointRounding.AwayFromZero);
+
+    /// <summary>
+    /// ¿Este sector tiene (o tendría) audio? Video cargado, o un video AUSENTE: su silencio se
+    /// persiste y viaja con el clip, así que el "solo" también lo tiene que alcanzar — al
+    /// re-vincularlo tiene que volver callado, como el resto del board.
+    /// Imágenes y sectores vacíos no suenan: tocarles el mute sería cambiar un estado invisible.
+    /// </summary>
+    public bool HasAudio =>
+        Kind == MediaKind.Video ||
+        (MissingPath is { } missing && MediaKinds.FromPath(missing) == MediaKind.Video);
+
     /// <summary>
     /// Empuja volumen y mute al reproductor.
     ///
@@ -177,12 +227,35 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// propiedad, al arrancar la reproducción, y en el tick donde la duración se conoce por
     /// primera vez (que es la señal de que el media ya abrió de verdad). Llamarlo una sola vez
     /// al cargar deja el nivel sin aplicar y el sector suena siempre a 100.
+    /// (Cambiar el master del board es una cuarta entrada, pero es la misma que "cambió la
+    /// propiedad": ver <see cref="BoardMasterVolume"/>.)
     /// </summary>
     private void ApplyAudio()
     {
         if (Player is null) return;
-        Player.Volume = Math.Clamp(Volume, 0, 100);
+        var effective = EffectiveVolume(Volume, BoardMasterVolume);
+        Player.Volume = effective;
         Player.Mute = IsMuted;
+
+        // Para las pruebas: lo que PEDIMOS y lo que VLC dice tener. Antes de que exista la salida
+        // de audio VLC devuelve -1, y es justo lo que demuestra por qué hacen falta los tres
+        // momentos. Apagado salvo con AMPZ_DIAG_LOG.
+        if (DiagLog.Enabled)
+            DiagLog.Write($"audio {Title} sector={Volume} master={BoardMasterVolume} req={effective} vlc={Player.Volume} mute={IsMuted} vlcmute={Player.Mute}");
+    }
+
+    /// <summary>
+    /// Para las pruebas: lo que VLC dice tener AHORA, SIN escribir nada antes. Es lo que
+    /// distingue "cada player tiene su volumen" de "todos comparten uno": la línea <c>audio</c>
+    /// de <see cref="ApplyAudio"/> lee justo después de escribir, así que con un control
+    /// compartido igual devolvería lo recién puesto. Este readback se toma DESPUÉS de que
+    /// todos los sectores aplicaron el suyo — si el control es compartido, todos leen el del
+    /// último. Ver tools/test-audio.ps1. Solo con AMPZ_DIAG_LOG.
+    /// </summary>
+    public void DiagAudioState()
+    {
+        if (!DiagLog.Enabled || Player is null || !IsPlaying) return;
+        DiagLog.Write($"audiostate {Title} req={EffectiveVolume(Volume, BoardMasterVolume)} vlc={Player.Volume} mute={IsMuted} vlcmute={Player.Mute}");
     }
 
     /// <summary>
@@ -214,7 +287,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // guardado, porque ahí el Load() corre antes de que exista el VideoView.
         // El Play() lo dispara la vista vía StartPending(), ya con la superficie enganchada.
         var player = new MediaPlayer(VlcEngine.Instance) { EnableMouseInput = false, EnableKeyInput = false };
-        _pending = new LibVLCSharp.Shared.Media(VlcEngine.Instance, new Uri(path));
+        _pending = VlcEngine.NewMedia(path);
 
         if (startAtMs > 0)
         {
@@ -253,6 +326,9 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         var media = _pending;
         _pending = null;
 
+        // Para tools/test-replace.ps1: con qué ventana arranca cada clip. Es lo que demostró que
+        // la ventana suelta del reemplazo NO era un HWND en cero (ver StartWhenSurfaceReady).
+        DiagLog.Write($"play {Title} hwnd=0x{Player.Hwnd:X}");
         Player.Play(media);
         // Después del Play, libvlc se queda con su propia referencia al media: soltar la nuestra
         // acá es correcto y evita filtrar un objeto nativo por cada clip cargado.
@@ -391,9 +467,16 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// El clip vuelve REPRODUCIENDO aunque estuviera pausado. Es deliberado: re-montar pausado
     /// obliga a VLC a decodificar un frame para mostrarlo, y la mitad de las veces te deja el
     /// sector en negro — peor que la pequeña sorpresa de que arranque.
+    ///
+    /// ⚠ Un clip que TODAVÍA NO arrancó (<see cref="_pending"/> no es null) NO se re-monta.
+    /// Nunca se reprodujo en ninguna superficie, así que no hay ventana vieja de la que
+    /// rescatarlo: la vista nueva lo arranca sola vía StartPending. Re-montarlo era cargar el
+    /// archivo DOS VECES — y era el caso de TODO sector al abrir un board, porque LoadFrom deja
+    /// los clips pendientes y ReplaceRoot → Rebuild llamaba a Remount sobre cada uno.
     /// </summary>
     public void Remount()
     {
+        if (_pending is not null) return;
         if (Kind != MediaKind.Video || MediaPath is not { } path) return;
 
         var position = PositionMs;
@@ -413,22 +496,32 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         LoopEnabled = loopEnabled;
     }
 
-    /// <summary>Vacía el sector y libera el reproductor.</summary>
+    /// <summary>
+    /// Vacía el sector y libera el reproductor.
+    ///
+    /// La parte cara (el Stop() bloqueante de libvlc) NO corre acá: se delega a
+    /// <see cref="VlcEngine.Release"/>, que la hace en otro hilo y en paralelo con los demás
+    /// sectores. Todo lo que queda en este método es barato y es del hilo de UI.
+    /// </summary>
     public void Unload()
     {
+        // Un media pendiente nunca llegó a reproducirse: soltarlo es liberar un objeto, no
+        // detener nada. Barato, se queda en el hilo de UI.
         _pending?.Dispose();
         _pending = null;
 
         var player = Player;
+
+        // ⚠ ORDEN CRÍTICO: desenganchar ANTES de liberar. Player = null dispara SyncRender en la
+        // vista, que suelta el VideoView del reproductor. Recién con eso hecho se lo entrega a
+        // otro hilo para detenerlo; al revés, el render de VLC escribiría sobre una ventana
+        // que ya no existe.
         Player = null;
 
-        if (player is not null)
-        {
-            // Stop() antes de Dispose(): soltar el player mientras decodifica deja el hilo de
-            // VLC trabajando sobre memoria liberada.
-            player.Stop();
-            player.Dispose();
-        }
+        // A partir de acá el nodo ya no tiene NADA que ver con ese player: si en la misma vuelta
+        // se le carga otro clip (Load llama a Unload), el nuevo arranca mientras el viejo se
+        // detiene en paralelo, sin compartir ningún estado.
+        if (player is not null) VlcEngine.Release(player);
 
         ImageSource = null;
         MediaPath = null;
@@ -451,6 +544,11 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // es el arranque, no un "reanudar".
         if (_pending is not null)
         {
+            // ⚠ Salvo que haya un player viejo deteniéndose: su vout puede tener todavía la
+            // ventana de este sector, y un Play() ahora terminaría en una ventana propia de VLC
+            // (ver SectorView.StartWhenSurfaceReady). La vista ya tiene agendado el arranque para
+            // cuando se libere; el Espacio no puede adelantarlo.
+            if (!VlcEngine.WhenReleased().IsCompleted) return;
             StartPending();
             return;
         }
@@ -504,11 +602,19 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         IsFrozen = true;
         _resumeAfterThaw = false;
 
-        if (Player is { } player && player.IsPlaying)
+        // ⚠ Se mira TAMBIÉN nuestro IsPlaying, no solo el de VLC. Un clip recién arrancado pasa
+        // unos cientos de ms en Opening/Buffering, y ahí player.IsPlaying todavía es false: sin
+        // esta segunda condición, cambiar de pestaña justo después de abrir un board dejaba ese
+        // clip decodificando en una pestaña que no se ve (y sin anotarlo para reanudar).
+        if (Player is { } player && _pending is null && (player.IsPlaying || IsPlaying))
         {
             player.SetPause(true);
             _resumeAfterThaw = true;
         }
+
+        // Para tools/test-dock.ps1: "el clip del panel fijado NUNCA se congela al cambiar de
+        // pestaña" se prueba contando estas líneas. Solo con AMPZ_DIAG_LOG.
+        DiagLog.Write($"freeze {Title}");
     }
 
     /// <summary>
@@ -529,6 +635,12 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
         _lastSeekTick = Environment.TickCount64;
         _seekCooldownMs = ReseekCooldownMs;
+
+        // ⚠ Se reancla la estimación del playhead al valor REAL de VLC. El ancla de antes del
+        // congelado tiene un TickCount viejo (segundos, o minutos si la pestaña estuvo en segundo
+        // plano), así que el primer Tick le sumaría el techo de extrapolación entero: un salto
+        // de hasta 600ms inventado que, cerca del marker B, dispara un loop que nadie pidió.
+        if (Player is { } p && p.Time is var t and >= 0) Reanchor(t);
     }
 
     /// <summary>
@@ -551,7 +663,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     {
         if (Player is null || MediaPath is not { } path) return;
 
-        var media = new LibVLCSharp.Shared.Media(VlcEngine.Instance, new Uri(path));
+        var media = VlcEngine.NewMedia(path);
         if (ms > 0)
         {
             // InvariantCulture obligatorio: ver Load(). ":start-time=12,4" para VLC es basura.

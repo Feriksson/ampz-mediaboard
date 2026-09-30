@@ -35,6 +35,23 @@ public sealed class BoardView : ContentControl
     }
 
     /// <summary>
+    /// Deja rastro (DiagLog) cada vez que la vista SALE de un padre visual: re-parentarla o
+    /// sacarla de BoardHost. Reordenar pestañas no puede hacerlo nunca, y desde afuera no se nota
+    /// — ni reabre archivos ni apaga el video — así que sin este aviso la prueba no lo ve. Ver
+    /// tools/test-tab-reorder.ps1.
+    ///
+    /// ⚠ Por qué acá y no en Unloaded: se midió que un Remove + Insert en la misma vuelta del
+    /// Dispatcher NO dispara Unloaded (WPF lo posterga y lo anula al volver a cargarse), y la
+    /// mutación "re-parentar al reordenar" pasaba en verde. Este override corre sincrónico en
+    /// cada cambio de padre. Colapsar la vista (cambiar de pestaña) no cambia el padre.
+    /// </summary>
+    protected override void OnVisualParentChanged(DependencyObject oldParent)
+    {
+        base.OnVisualParentChanged(oldParent);
+        if (oldParent is not null) DiagLog.Write($"viewreparent {oldParent.GetType().Name}");
+    }
+
+    /// <summary>
     /// Reconstruye el árbol visual COMPLETO. Es un martillo, sí, pero solo se dispara cuando el
     /// usuario parte o cierra un sector — acciones deliberadas y poco frecuentes. Reconstruir
     /// únicamente el subárbol afectado sería más eficiente y bastante más código; no vale el
@@ -50,11 +67,17 @@ public sealed class BoardView : ContentControl
         // Y los clips se re-montan: la ventana de salida de libvlc se fija en el Play(), así que
         // un reproductor que sobrevive a la reconstrucción se queda dibujando en el HWND viejo,
         // que ya no existe. Remount() lo relanza desde donde iba. Ver SectorNode.Remount.
+        // Los clips que todavía no arrancaron (recién abiertos desde un .mboard) NO se tocan:
+        // Remount los saltea y la vista nueva los arranca. Antes se cargaban dos veces.
         foreach (var sector in SplitNode.Sectors(_board.Root))
             sector.Remount();
 
         _grids.Clear();
         Content = Build(_board.Root);
+
+        // Una vista de segundo plano que se reconstruye (se abrió un board en una pestaña que
+        // todavía no se mostró) nace con sus sectores congelados, igual que los que reemplaza.
+        if (_suspended) SetSectorsFrozen(true);
     }
 
     private UIElement Build(LayoutNode node) => node switch
@@ -187,6 +210,70 @@ public sealed class BoardView : ContentControl
     {
         foreach (var view in FindSectorViews(Content as DependencyObject))
             view.SetFrozen(frozen);
+    }
+
+    /// <summary>
+    /// Congela el board entero por un arrastre que NO es de un splitter propio: el divisor entre
+    /// las pestañas y el panel fijado (MainWindow). Ese divisor cambia el ancho de los DOS lados,
+    /// así que mueve las ventanas nativas de los dos: MainWindow congela la pestaña activa Y el
+    /// panel con esto. Mismo arreglo en dos mitades que el splitter interno (pausa + colapso).
+    /// </summary>
+    public void BeginExternalResize()
+    {
+        _board.BeginInteractiveResize();
+        SetSectorsFrozen(true);
+    }
+
+    /// <summary>
+    /// Termina el congelado de <see cref="BeginExternalResize"/>. ⚠ Si la pestaña pasó a segundo
+    /// plano a mitad del arrastre (Ctrl+Tab con el mouse apretado) NO se descongela la vista:
+    /// devolvería el video de una pestaña colapsada. Resume la despierta al volver.
+    /// </summary>
+    public void EndExternalResize()
+    {
+        if (_suspended) return;
+        SetSectorsFrozen(false);
+        _board.EndInteractiveResize();
+    }
+
+    /// <summary>La vista está en una pestaña de segundo plano. Ver <see cref="SetSuspended"/>.</summary>
+    private bool _suspended;
+
+    /// <summary>
+    /// Manda la vista a segundo plano (o la trae de vuelta) SIN reconstruir nada.
+    ///
+    /// ⚠ Es la decisión central de las pestañas: la vista de una pestaña inactiva sigue VIVA,
+    /// colapsada. Reconstruirla al volver obligaría a Remount en cada sector (VLC reabriendo
+    /// cada archivo: frames negros y un salto visible), y eso es justo lo que hace que cambiar
+    /// de pestaña se sienta lento. Así, cambiar de pestaña es cambiar dos Visibility.
+    ///
+    /// Colapsa la vista entera (sale del layout: sus ventanas nativas no se miden ni se
+    /// posicionan) y ADEMÁS congela cada sector con el mismo SetFrozen del arrastre de
+    /// splitter, que es el camino ya probado para esconder la ventana del VideoView y su
+    /// ventana de overlay. Collapsed y no Hidden, por el mismo motivo que en SetFrozen: Hidden
+    /// sigue participando del layout.
+    /// </summary>
+    public void SetSuspended(bool suspended)
+    {
+        _suspended = suspended;
+        SetSectorsFrozen(suspended);
+        Visibility = suspended ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>
+    /// Suelta todos los VideoView antes de tirar la vista (se cerró la pestaña). Igual que en
+    /// Rebuild: cada uno hostea una ventana nativa que hay que desenganchar a mano. Se llama
+    /// DESPUÉS de liberar el board, así los players ya se desengancharon por el camino de
+    /// SectorNode.Unload (desenganchar antes de liberar).
+    /// </summary>
+    public void Release()
+    {
+        _board.LayoutChanged -= Rebuild;
+        _board.RatiosChanged -= ApplyRatios;
+        foreach (var view in FindSectorViews(Content as DependencyObject))
+            view.Detach();
+        Content = null;
+        _grids.Clear();
     }
 
     /// <summary>Recorre el árbol visual juntando los SectorView para poder soltarlos.</summary>
