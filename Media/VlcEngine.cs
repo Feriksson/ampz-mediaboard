@@ -163,6 +163,13 @@ public static class VlcEngine
     /// fondo toca SOLO el objeto que recibe, nunca el nodo: el nodo puede volver a cargarse
     /// otro clip en el hilo de UI mientras el player viejo todavía se está deteniendo.
     ///
+    /// ⚠ Consecuencia que costó un bug (ventana suelta de VLC al reemplazar un clip): hasta que
+    /// este Stop() termina, el vout del player viejo SIGUE siendo dueño de su HWND, y libvlc NO
+    /// comparte un HWND ocupado ("drawable: HWND 0x… is busy") — el player nuevo que arranque
+    /// sobre esa misma ventana cae a una ventana propia. Por eso ningún Play() arranca mientras
+    /// haya liberaciones en curso: lo espera <c>SectorView.StartWhenSurfaceReady</c> vía
+    /// <see cref="WhenReleased"/>.
+    ///
     /// Hilo dedicado (LongRunning) y no del pool: son llamadas nativas que bloquean, y con 8
     /// sectores ocuparían el pool entero justo cuando el board nuevo quiere arrancar.
     /// </summary>

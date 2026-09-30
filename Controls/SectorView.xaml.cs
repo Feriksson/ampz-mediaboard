@@ -519,19 +519,52 @@ public partial class SectorView : UserControl
     /// pestaña que nadie mira. Se espera al IsVisibleChanged de cuando la pestaña se activa
     /// (enganchado en el constructor). Mismo invariante que el bug #1: Play() solo con una
     /// superficie de verdad.
+    ///
+    /// ⚠ Y hace falta que la ventana esté LIBRE: se espera a que terminen los Stop() en curso
+    /// (<see cref="VlcEngine.WhenReleased"/>). Bug reportado: soltar un clip sobre un sector YA
+    /// OCUPADO abría una ventana propia de VLC con el clip NUEVO, flotando fuera de la app. El
+    /// player nuevo SÍ tenía el HWND bien puesto (medido con el DiagLog: la línea <c>play</c>
+    /// muestra el mismo HWND que usaba el clip viejo). El problema es que libvlc lleva una lista
+    /// de HWND "ocupados" por un vout, y si le das uno ocupado NO lo comparte: avisa "HWND is
+    /// busy" y cae a su ventana top-level propia — el bug #1 por otra puerta. Y estaba ocupado
+    /// porque desde el cierre rápido (VlcEngine.Release) el Stop() del player viejo corre en
+    /// otro hilo y todavía no había soltado su vout cuando el nuevo arrancaba. Antes, el Stop
+    /// sincrónico lo soltaba siempre primero.
+    /// Se espera acá y no con un Stop sincrónico en Load: así la UI sigue sin bloquearse (el
+    /// objetivo del cierre rápido), y cubre TODOS los caminos que recargan un sector sobre su
+    /// propia ventana (soltar, elegir, pegar, intercambiar, fijar), no solo el drop.
+    /// Se esperan TODAS las liberaciones y no solo la del player viejo de ESTE sector: son de
+    /// 100-500ms y a lo sumo retrasan un arranque ese rato, pero cubren también que Windows
+    /// reuse el valor numérico de un HWND destruido por un Rebuild mientras su vout se detiene.
+    /// Con techo (<see cref="VlcEngine.ReleaseTimeout"/>): si VLC quedó trabado deteniendo un
+    /// player, esperar más no lo destraba, y un sector que no arranca nunca es peor.
+    /// Regresión: tools/test-replace.ps1.
     /// </summary>
     private void StartWhenSurfaceReady()
     {
         if (_node?.Player is null || !Video.IsLoaded || !Video.IsVisible) return;
 
         var node = _node;
-        Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        // Action explícito: async void a propósito, para que una excepción de StartPending llegue
+        // al Dispatcher como antes y no quede tragada en una Task que nadie mira.
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, (Action)(async () =>
         {
+            // En bucle: mientras esperábamos pudo empezar OTRA liberación (un segundo drop
+            // encima), y esa también puede estar ocupando la ventana.
+            var deadline = Environment.TickCount64 + (long)VlcEngine.ReleaseTimeout.TotalMilliseconds;
+            while (VlcEngine.WhenReleased() is { IsCompleted: false } released &&
+                   Environment.TickCount64 < deadline)
+            {
+                DiagLog.Write($"playwait {node.Title}");
+                var left = deadline - Environment.TickCount64;
+                await Task.WhenAny(released, Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1, left))));
+            }
+
             // El sector pudo haber cambiado de contenido mientras esperábamos la vuelta del
             // Dispatcher (otro drop encima, o un cierre), o la pestaña pudo volver a segundo
             // plano. En cualquiera de los dos casos, no tocamos nada.
             if (ReferenceEquals(_node, node) && Video.IsVisible) node.StartPending();
-        });
+        }));
     }
 
     private void SyncTimeLabel()

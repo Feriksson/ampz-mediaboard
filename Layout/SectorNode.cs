@@ -326,6 +326,9 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         var media = _pending;
         _pending = null;
 
+        // Para tools/test-replace.ps1: con qué ventana arranca cada clip. Es lo que demostró que
+        // la ventana suelta del reemplazo NO era un HWND en cero (ver StartWhenSurfaceReady).
+        DiagLog.Write($"play {Title} hwnd=0x{Player.Hwnd:X}");
         Player.Play(media);
         // Después del Play, libvlc se queda con su propia referencia al media: soltar la nuestra
         // acá es correcto y evita filtrar un objeto nativo por cada clip cargado.
@@ -541,6 +544,11 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // es el arranque, no un "reanudar".
         if (_pending is not null)
         {
+            // ⚠ Salvo que haya un player viejo deteniéndose: su vout puede tener todavía la
+            // ventana de este sector, y un Play() ahora terminaría en una ventana propia de VLC
+            // (ver SectorView.StartWhenSurfaceReady). La vista ya tiene agendado el arranque para
+            // cuando se libere; el Espacio no puede adelantarlo.
+            if (!VlcEngine.WhenReleased().IsCompleted) return;
             StartPending();
             return;
         }

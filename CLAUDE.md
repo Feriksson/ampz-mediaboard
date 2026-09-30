@@ -701,8 +701,8 @@ pestaña suspendiendo y re-montando el panel (13 aperturas, 13 congelados y una 
 
 ### ⚠ Bugs ya cazados — no los revivas
 
-Cinco trampas que ya costaron una ronda de debug. La 1, la 2, la 3 y la 5 se reportaron desde la
-UI; la cuarta se anticipó antes de que se viera.
+Seis trampas que ya costaron una ronda de debug. La 1, la 2, la 3, la 5 y la 6 se reportaron desde
+la UI; la cuarta se anticipó antes de que se viera.
 
 **1. `Play()` sin HWND → VLC abre SU PROPIA VENTANA.**
 Si le pedís Play a libvlc sin haberle asignado una ventana de salida, **no falla**: se abre una
@@ -763,7 +763,23 @@ entre el `Stop()` y que VLC reabra el archivo `Time` devuelve 0 con bug y sin bu
 versión de la sonda pasaba contra el código roto. Hay que dejar correr una ventana fija (~900ms) y
 comparar por CERCANÍA contra {marker, `:start-time`}.
 
-Las cinco **desaparecen** al migrar a custom rendering (`WriteableBitmap`): sin HWND no hay
+**6. Un HWND OCUPADO también saca el video afuera (regresión del cierre rápido).**
+Reportado como *"suelto un video sobre un sector que ya tiene uno y se SALE AFUERA en una ventana
+de VLC"*. Es la 1 por otra puerta, y NO era un HWND en cero: medido con el DiagLog, el player
+nuevo arrancaba con el MISMO HWND válido que usaba el clip viejo, y la ventana suelta mostraba el
+clip NUEVO. El log de libvlc lo dijo textual: `drawable: HWND 0x… is busy`. libvlc lleva una
+lista de HWND tomados por un vout y **no comparte uno ocupado**: cae a su ventana top-level
+propia. Estaba ocupado porque desde el cierre rápido (`VlcEngine.Release`) el `Stop()` del player
+viejo corre en OTRO hilo, y todavía no había soltado su vout cuando el nuevo hacía `Play()`.
+→ Fix: `SectorView.StartWhenSurfaceReady` espera a `VlcEngine.WhenReleased()` (con techo de
+`ReleaseTimeout`) antes de `StartPending`; `TogglePlay` no adelanta un arranque pendiente mientras
+haya liberaciones en curso. NO se volvió al `Stop()` sincrónico: la UI sigue sin bloquearse, y la
+espera cubre todo camino que recarga un sector sobre su propia ventana (soltar, `…`, `Ctrl+V`,
+intercambiar, fijar), no solo el drop.
+Regresión: `tools/test-replace.ps1` (reemplaza el clip por el diálogo `…` vía UI Automation y
+busca ventanas con owner 0). Rojo 2 de 2 con el fix revertido.
+
+Las seis **desaparecen** al migrar a custom rendering (`WriteableBitmap`): sin HWND no hay
 ventana propia de VLC, ni ventana de overlay, ni re-montaje al re-parentar (que es lo que obliga a
 usar `:start-time`, o sea que la 5 se va con la 4), ni airspace tragándose los eventos de drop.
 
@@ -1229,7 +1245,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path, **cierre rápido** —`test-close.ps1`— , **pestañas** —`test-tabs.ps1`—, **reordenar pestañas** —`test-tab-reorder.ps1`, mouse real, sale **2** si el escritorio está en uso— y **audio por sector** —`test-audio.ps1`, suena un tono bajo unos segundos—). `test-multi.ps1` y `test-boardfile.ps1` derivan el exe de `$PSScriptRoot` y generan su GIF de prueba en `%TEMP%` con ffmpeg (hasta 2026-09-30 apuntaban a la carpeta vieja del repo y a un scratchpad borrado: fallaban siempre). ⚠ `test-boardfile.ps1` BORRA la asociación `.mboard` y la vuelve a registrar contra el exe de **Debug**: después de correrlo, repuntala al Release con "Asociar .mboard" o el doble click abre el binario equivocado. ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el **solo** (caso 5), la cuenta y el empuje del **volumen general** (caso 6) y su round-trip en el `.mboard` más el archivo VIEJO sin el campo que tiene que cargar en 100 y NO leerse como modificado (caso 7), el `.mboard` v2 de **varias pestañas** ida y vuelta (caso 8), el archivo viejo que abre como UNA pestaña con el nombre del archivo y SIN cambios (caso 9), renombrar / agregar / quitar pestañas como cambios mientras la pestaña activa no lo es (caso 10), y reordenarlas: orden persistido, misma activa, cambio que se deshace al volver, y la regla del arrastre sin rebote (caso 11); el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path, **cierre rápido** —`test-close.ps1`— , **pestañas** —`test-tabs.ps1`—, **reordenar pestañas** —`test-tab-reorder.ps1`, mouse real, sale **2** si el escritorio está en uso— **audio por sector** —`test-audio.ps1`, suena un tono bajo unos segundos— y **reemplazar el clip de un sector ocupado sin ventana suelta de VLC** —`test-replace.ps1`, bug 6—). `test-multi.ps1` y `test-boardfile.ps1` derivan el exe de `$PSScriptRoot` y generan su GIF de prueba en `%TEMP%` con ffmpeg (hasta 2026-09-30 apuntaban a la carpeta vieja del repo y a un scratchpad borrado: fallaban siempre). ⚠ `test-boardfile.ps1` BORRA la asociación `.mboard` y la vuelve a registrar contra el exe de **Debug**: después de correrlo, repuntala al Release con "Asociar .mboard" o el doble click abre el binario equivocado. ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el **solo** (caso 5), la cuenta y el empuje del **volumen general** (caso 6) y su round-trip en el `.mboard` más el archivo VIEJO sin el campo que tiene que cargar en 100 y NO leerse como modificado (caso 7), el `.mboard` v2 de **varias pestañas** ida y vuelta (caso 8), el archivo viejo que abre como UNA pestaña con el nombre del archivo y SIN cambios (caso 9), renombrar / agregar / quitar pestañas como cambios mientras la pestaña activa no lo es (caso 10), y reordenarlas: orden persistido, misma activa, cambio que se deshace al volver, y la regla del arrastre sin rebote (caso 11); el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
 | raíz | `App`, `MainWindow`, `DiagLog` (log de diagnóstico, solo con `AMPZ_DIAG_LOG`), `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---
