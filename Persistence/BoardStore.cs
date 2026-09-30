@@ -8,8 +8,18 @@ namespace AmpzMediaBoard.Persistence;
 /// <summary>Una pestaña tal como se guarda: su nombre, su árbol y su volumen general.</summary>
 public sealed record TabData(string Name, LayoutNode Root, int MasterVolume = 100);
 
-/// <summary>Un archivo `.mboard` leído: TODAS sus pestañas y cuál estaba activa al guardarlo.</summary>
-public sealed record DocumentData(IReadOnlyList<TabData> Tabs, int ActiveTab);
+/// <summary>
+/// El panel fijado tal como se guarda: sus sectores de arriba hacia abajo y su ancho como
+/// PROPORCIÓN del área de boards (0..1), nunca en píxeles — el archivo se reabre en otra
+/// pantalla o con la ventana de otro tamaño. Ver <see cref="AmpzMediaBoard.Board.PinnedDock"/>.
+/// </summary>
+public sealed record DockData(double Width, IReadOnlyList<SectorNode> Sectors);
+
+/// <summary>
+/// Un archivo `.mboard` leído: TODAS sus pestañas, cuál estaba activa al guardarlo y el panel
+/// fijado (null si no había ninguno: los archivos anteriores al panel no lo tienen).
+/// </summary>
+public sealed record DocumentData(IReadOnlyList<TabData> Tabs, int ActiveTab, DockData? Dock = null);
 
 /// <summary>
 /// El archivo tal como estaba al abrirlo o guardarlo, NORMALIZADO (ver <see cref="BoardStore.ReadSnapshot"/>):
@@ -23,7 +33,10 @@ public sealed record FileSnapshot(string Document, IReadOnlyList<string> Tabs);
 /// una con su árbol de layout + qué archivo hay en cada sector + los markers de loop.
 ///
 /// Formato v2 (lo único que se escribe):
-/// <code>{ "Version": 2, "ActiveTab": i, "Tabs": [ { "Name", "MasterVolume"?, "Root": {árbol} } ] }</code>
+/// <code>{ "Version": 2, "ActiveTab": i, "Tabs": [ { "Name", "MasterVolume"?, "Root": {árbol} } ], "Dock"?: { "Width", "Sectors": [ {sector} ] } }</code>
+/// "Dock" es del ARCHIVO y no de una pestaña (el panel fijado vive fuera de las pestañas), y se
+/// escribe SOLO si el panel tiene algo: un v2 anterior al panel y uno con el panel vacío
+/// describen el mismo documento, y tienen que normalizar igual.
 /// El formato VIEJO (un solo board: el árbol pelado en la raíz del JSON) se sigue LEYENDO, como
 /// un archivo de UNA pestaña con el nombre del archivo. Ver <see cref="ParseFile"/>.
 ///
@@ -65,6 +78,18 @@ public static class BoardStore
         public int? ActiveTab { get; set; }
 
         public List<TabDto> Tabs { get; set; } = [];
+
+        /// <summary>El panel fijado. null (= ausente) cuando está vacío: ver <see cref="ToDockDto"/>.</summary>
+        public DockDto? Dock { get; set; }
+    }
+
+    private sealed class DockDto
+    {
+        /// <summary>Ancho del panel como proporción del área de boards, redondeado (ver <see cref="NormalizeWidth"/>).</summary>
+        public double Width { get; set; }
+
+        /// <summary>Los sectores, de arriba hacia abajo. Siempre hojas: el panel es una pila, no un árbol.</summary>
+        public List<NodeDto> Sectors { get; set; } = [];
     }
 
     private sealed class TabDto
@@ -122,6 +147,15 @@ public static class BoardStore
     /// <summary>Nombre para una pestaña guardada sin nombre (archivo tocado a mano).</summary>
     private static string DefaultName(int index) => $"Board {index + 1}";
 
+    /// <summary>
+    /// Ancho del panel como se escribe: acotado (un panel de ancho 0 o del 100% sería
+    /// irrecuperable con el mouse) y REDONDEADO a 4 decimales. El redondeo es el mismo al escribir
+    /// y al normalizar, así que el archivo y la memoria comparan igual; y un splitter soltado
+    /// donde estaba no deja ruido de punto flotante que se lea como "modificado".
+    /// </summary>
+    public static double NormalizeWidth(double width) =>
+        double.IsFinite(width) ? Math.Round(Math.Clamp(width, 0.1, 0.8), 4) : 0.25;
+
     #region Archivos .mboard
 
     /// <summary>
@@ -133,8 +167,8 @@ public static class BoardStore
     /// clip, mover un marker, partir un sector, renombrar o cerrar una pestaña…) y alcanza con
     /// que se escape una para que el aviso mienta. Comparar el resultado no puede equivocarse.
     /// </summary>
-    public static string Serialize(IReadOnlyList<TabData> tabs, int? activeTab = null) =>
-        JsonSerializer.Serialize(ToFileDto(tabs, activeTab), Options);
+    public static string Serialize(IReadOnlyList<TabData> tabs, DockData? dock = null, int? activeTab = null) =>
+        JsonSerializer.Serialize(ToFileDto(tabs, dock, activeTab), Options);
 
     /// <summary>Una pestaña sola, en la forma de comparar. Pinta la "•" de esa pestaña.</summary>
     public static string SerializeTab(TabData tab) => JsonSerializer.Serialize(ToTabDto(tab), Options);
@@ -144,9 +178,9 @@ public static class BoardStore
     /// de cambios sin guardar. Ante cualquier duda (archivo ilegible, corrupto) devuelve true: no
     /// vamos a trabarle el cierre al usuario por un problema de disco.
     /// </summary>
-    public static bool MatchesFile(string path, IReadOnlyList<TabData> tabs) =>
+    public static bool MatchesFile(string path, IReadOnlyList<TabData> tabs, DockData? dock = null) =>
         ReadSnapshot(path) is not { } saved ||
-        string.Equals(Serialize(tabs), saved.Document, StringComparison.Ordinal);
+        string.Equals(Serialize(tabs, dock), saved.Document, StringComparison.Ordinal);
 
     /// <summary>
     /// El contenido del archivo NORMALIZADO, en la forma de comparar, o null si no se pudo leer.
@@ -181,11 +215,11 @@ public static class BoardStore
     /// Guarda TODAS las pestañas en un archivo del usuario, siempre en formato v2. Devuelve el
     /// error si falló, o null si salió bien.
     /// </summary>
-    public static string? SaveTo(string path, IReadOnlyList<TabData> tabs, int activeTab)
+    public static string? SaveTo(string path, IReadOnlyList<TabData> tabs, int activeTab, DockData? dock = null)
     {
         try
         {
-            File.WriteAllText(path, Serialize(tabs, activeTab));
+            File.WriteAllText(path, Serialize(tabs, dock, activeTab));
             return null;
         }
         catch (Exception ex)
@@ -212,7 +246,12 @@ public static class BoardStore
             var tabs = file.Tabs
                 .Select(t => new TabData(t.Name!, FromDto(t.Root!), t.MasterVolume ?? 100))
                 .ToList();
-            return new DocumentData(tabs, Math.Clamp(file.ActiveTab ?? 0, 0, tabs.Count - 1));
+            // Los sectores del panel se construyen igual que los de una pestaña: sus clips quedan
+            // PENDIENTES hasta que el panel tiene una superficie visible (bug #1).
+            var dock = file.Dock is { } d
+                ? new DockData(d.Width, d.Sectors.Select(s => (SectorNode)FromDto(s)).ToList())
+                : null;
+            return new DocumentData(tabs, Math.Clamp(file.ActiveTab ?? 0, 0, tabs.Count - 1), dock);
         }
         catch
         {
@@ -265,18 +304,39 @@ public static class BoardStore
             tab.Root!.MasterVolume = null;
         }
 
+        // El panel: vacío = ausente (la misma regla que al escribir). Sus sectores son SIEMPRE
+        // hojas: un "split" metido a mano se descarta en vez de reinterpretarse como otra cosa.
+        if (file.Dock is { } dock)
+        {
+            dock.Sectors = (dock.Sectors ?? []).Where(s => s is not null && s.Type != "split").ToList();
+            foreach (var sector in dock.Sectors) sector.MasterVolume = null;
+            dock.Width = NormalizeWidth(dock.Width);
+            if (dock.Sectors.Count == 0) file.Dock = null;
+        }
+
         file.Version = FormatVersion;
         return file;
     }
 
     #endregion
 
-    private static FileDto ToFileDto(IReadOnlyList<TabData> tabs, int? activeTab) => new()
+    private static FileDto ToFileDto(IReadOnlyList<TabData> tabs, DockData? dock, int? activeTab) => new()
     {
         Version = FormatVersion,
         ActiveTab = activeTab,
         Tabs = tabs.Select(ToTabDto).ToList(),
+        Dock = ToDockDto(dock),
     };
+
+    /// <summary>
+    /// ⚠ Un panel VACÍO se escribe como AUSENTE, no como <c>{ "Sectors": [] }</c>. Si no, todo
+    /// archivo anterior al panel (que no tiene el campo) se leería como modificado al abrirlo:
+    /// el documento en memoria diría "panel vacío" y el archivo "no hay panel", que son lo mismo.
+    /// </summary>
+    private static DockDto? ToDockDto(DockData? dock) =>
+        dock is { Sectors.Count: > 0 }
+            ? new DockDto { Width = NormalizeWidth(dock.Width), Sectors = dock.Sectors.Select(s => ToDto(s)).ToList() }
+            : null;
 
     private static TabDto ToTabDto(TabData tab) => new()
     {

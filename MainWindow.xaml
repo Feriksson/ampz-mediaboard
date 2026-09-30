@@ -199,9 +199,35 @@
             </Grid>
         </Border>
 
-        <!-- Acá viven las BoardView de TODAS las pestañas, apiladas. Se cambia de pestaña por
-             Visibility (ver BoardTab.Activate): las inactivas siguen vivas y colapsadas, así sus
-             clips no se re-montan al volver. -->
-        <Grid x:Name="BoardHost" Grid.Row="2" Margin="4" />
+        <!-- ══ Área de boards: pestañas | divisor | panel fijado ══
+             ⚠ El panel fijado (DockHost) es HERMANO de BoardHost, NUNCA hijo. Cada video es una
+             ventana nativa que no puede cambiar de padre sin re-montarse (bug #4): dentro del
+             contenedor de las pestañas, cambiar de pestaña lo tocaría. Al lado, ni se entera.
+             Las columnas las maneja MainWindow.ApplyDockLayout: con el panel vacío, divisor y
+             panel miden CERO; con contenido, pestañas y panel son proporciones (star) del ancho.
+             Sigue visible en pantalla completa: es parte del board, no de la barra. -->
+        <Grid x:Name="BoardArea" Grid.Row="2" Margin="4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="TabsColumn" Width="*" />
+                <ColumnDefinition x:Name="DockSplitterColumn" Width="0" />
+                <ColumnDefinition x:Name="DockColumn" Width="0" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Acá viven las BoardView de TODAS las pestañas, apiladas. Se cambia de pestaña por
+                 Visibility (ver BoardTab.Activate): las inactivas siguen vivas y colapsadas, así
+                 sus clips no se re-montan al volver. -->
+            <Grid x:Name="BoardHost" Grid.Column="0" />
+
+            <GridSplitter x:Name="DockSplitter" Grid.Column="1" Visibility="Collapsed"
+                          Width="6" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                          ResizeDirection="Columns" ResizeBehavior="PreviousAndNext"
+                          Background="{StaticResource SplitterBrush}" Cursor="SizeWE"
+                          ToolTip="Arrastrá para cambiar el ancho del panel fijado"
+                          DragStarted="OnDockSplitterDragStarted"
+                          DragCompleted="OnDockSplitterDragCompleted" />
+
+            <!-- La BoardView del panel la pone MainWindow (una sola, vive lo que la ventana). -->
+            <Grid x:Name="DockHost" Grid.Column="2" Visibility="Collapsed" />
+        </Grid>
     </Grid>
 </Window>

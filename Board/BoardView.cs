@@ -212,6 +212,30 @@ public sealed class BoardView : ContentControl
             view.SetFrozen(frozen);
     }
 
+    /// <summary>
+    /// Congela el board entero por un arrastre que NO es de un splitter propio: el divisor entre
+    /// las pestañas y el panel fijado (MainWindow). Ese divisor cambia el ancho de los DOS lados,
+    /// así que mueve las ventanas nativas de los dos: MainWindow congela la pestaña activa Y el
+    /// panel con esto. Mismo arreglo en dos mitades que el splitter interno (pausa + colapso).
+    /// </summary>
+    public void BeginExternalResize()
+    {
+        _board.BeginInteractiveResize();
+        SetSectorsFrozen(true);
+    }
+
+    /// <summary>
+    /// Termina el congelado de <see cref="BeginExternalResize"/>. ⚠ Si la pestaña pasó a segundo
+    /// plano a mitad del arrastre (Ctrl+Tab con el mouse apretado) NO se descongela la vista:
+    /// devolvería el video de una pestaña colapsada. Resume la despierta al volver.
+    /// </summary>
+    public void EndExternalResize()
+    {
+        if (_suspended) return;
+        SetSectorsFrozen(false);
+        _board.EndInteractiveResize();
+    }
+
     /// <summary>La vista está en una pestaña de segundo plano. Ver <see cref="SetSuspended"/>.</summary>
     private bool _suspended;
 

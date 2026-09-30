@@ -46,8 +46,23 @@ public partial class SectorView : UserControl
     /// </summary>
     private bool _frozen;
 
-    /// <summary>Lo inyecta <c>BoardView</c> al crear la vista. Es quien sabe partir y cerrar sectores.</summary>
-    public BoardViewModel? Board { get; set; }
+    private BoardViewModel? _board;
+
+    /// <summary>
+    /// Lo inyecta <c>BoardView</c> al crear la vista. Es quien sabe partir y cerrar sectores, y
+    /// dice si el sector vive en el PANEL FIJADO (<see cref="BoardViewModel.IsDock"/>): la
+    /// cabecera cambia según eso. ⚠ Se asigna DESPUÉS del DataContext (orden del inicializador
+    /// en BoardView.Build), por eso re-sincroniza la cabecera al llegar.
+    /// </summary>
+    public BoardViewModel? Board
+    {
+        get => _board;
+        set
+        {
+            _board = value;
+            SyncHeader();
+        }
+    }
 
     public SectorView()
     {
@@ -60,6 +75,7 @@ public partial class SectorView : UserControl
         ClearButton.Click += (_, _) => _node?.Unload();
         CopyPathButton.Click += (_, _) => CopyPathToClipboard();
         CloseButton.Click += (_, _) => { if (_node is not null) Board?.Close(_node); };
+        PinButton.Click += (_, _) => { if (_node is not null) Board?.RequestPin(_node); };
         PlayButton.Click += (_, _) => _node?.TogglePlay();
         BrowseButton.Click += (_, _) => BrowseForMedia();
         RelinkButton.Click += (_, _) => BrowseForMedia();
@@ -75,7 +91,7 @@ public partial class SectorView : UserControl
         {
             if (!Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) || _node is null) return;
             e.Handled = true;
-            Board?.Solo(_node);
+            Board?.RequestSolo(_node);
         };
 
         // Doble click en el sector = copiar el path al portapapeles. Ver OnSectorDoubleClick.
@@ -279,6 +295,7 @@ public partial class SectorView : UserControl
         // que perdiste, y con ella en el portapapeles la pegás en el Explorer para ir a buscarla.
         CopyPathButton.Visibility = movable ? Visibility.Visible : Visibility.Collapsed;
         Header.Cursor = movable ? Cursors.SizeAll : Cursors.Arrow;
+        SyncHeader();
         EmptyHint.Visibility = kind == MediaKind.None && missing is null
             ? Visibility.Visible
             : Visibility.Collapsed;
@@ -290,6 +307,41 @@ public partial class SectorView : UserControl
         }
 
         StartWhenSurfaceReady();
+    }
+
+    /// <summary>
+    /// La cabecera según DÓNDE vive el sector:
+    ///  · en una pestaña: 📌 normal ("fijar"), solo si hay algo que fijar;
+    ///  · en el panel fijado: 📌 APRETADO ("desfijar", siempre visible: aun vacío, sacarlo del
+    ///    panel es la salida), y sin los botones de partir — el panel es una pila vertical que
+    ///    se reparte sola, no un layout libre.
+    /// No toca el video: es cabecera pura, WPF.
+    /// </summary>
+    private void SyncHeader()
+    {
+        var docked = _board?.IsDock == true;
+        var movable = _node is { HasMedia: true } or { IsMissing: true };
+
+        SplitVerticalButton.Visibility = docked ? Visibility.Collapsed : Visibility.Visible;
+        SplitHorizontalButton.Visibility = docked ? Visibility.Collapsed : Visibility.Visible;
+
+        PinButton.Visibility = docked || movable ? Visibility.Visible : Visibility.Collapsed;
+        PinButton.ToolTip = docked
+            ? "Desfijar: devolver el media a la pestaña activa"
+            : "Fijar en el panel lateral: queda a la vista en todas las pestañas";
+        System.Windows.Automation.AutomationProperties.SetName(PinButton, docked ? "Desfijar sector" : "Fijar sector");
+        PinButton.Background = docked ? PinnedFill : Brushes.Transparent;
+        PinButton.SetResourceReference(ForegroundProperty, docked ? "AccentBrush" : "DimTextBrush");
+    }
+
+    /// <summary>Fondo del 📌 "apretado": el acento, tenue, como el velo de drop.</summary>
+    private static readonly Brush PinnedFill = CreatePinnedFill();
+
+    private static Brush CreatePinnedFill()
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(0x40, 0x4C, 0xC2, 0xFF));
+        brush.Freeze();
+        return brush;
     }
 
     /// <summary>

@@ -603,6 +603,10 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
             player.SetPause(true);
             _resumeAfterThaw = true;
         }
+
+        // Para tools/test-dock.ps1: "el clip del panel fijado NUNCA se congela al cambiar de
+        // pestaña" se prueba contando estas líneas. Solo con AMPZ_DIAG_LOG.
+        DiagLog.Write($"freeze {Title}");
     }
 
     /// <summary>

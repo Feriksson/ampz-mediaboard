@@ -28,6 +28,12 @@ internal static class Program
         ArchivoViejoEsUnaPestanaSinCambios();
         RenombrarAgregarYQuitarSonCambios();
         ReordenarPestanasEsUnCambioQueSeDeshace();
+        FijarMudaElSectorAlPanel();
+        DesfijarVuelveALaPestanaActiva();
+        PanelSobreviveAlGuardado();
+        V2SinPanelNoEsUnCambio();
+        FijarYDesfijarSonCambios();
+        SoloAlcanzaPestanaYPanel();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -412,6 +418,247 @@ internal static class Program
 
         File.Delete(archivo);
         File.Delete(movido);
+    }
+
+    /// <summary>
+    /// FIJAR: el sector sale de su pestana (el hermano ocupa el lugar, el ultimo se vacia) y el
+    /// panel recibe el MISMO media con markers, volumen y silencio. Un sector vacio no se fija. El
+    /// segundo fijado se apila debajo y la pila queda en alturas iguales.
+    /// </summary>
+    private static void FijarMudaElSectorAlPanel()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 12. FIJAR: EL SECTOR SE MUDA AL PANEL ===");
+
+        var a = SectorCon(@"D:\clips\fijo.mp4", 120, 880, 37, true);
+        var b = SectorCon(@"D:\clips\queda.mp4", 0, 500, 90, false);
+        var tab = new BoardViewModel();
+        tab.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal, a, b));
+        var dock = new PinnedDock();
+
+        Check("el panel arranca sin contenido", !dock.HasContent && dock.ToData() is null);
+
+        var fijado = dock.Pin(tab, a);
+        Check("fijar devuelve el sector del panel", fijado is not null);
+        Check("el HERMANO ocupa todo el board de la pestana", ReferenceEquals(tab.Root, b));
+        Check("el sector fijado ya no esta en la pestana", !tab.AllSectors.Contains(a));
+        Check("el panel tiene el media", dock.HasContent && fijado?.MissingPath == @"D:\clips\fijo.mp4");
+        Check("con sus markers", fijado is { LoopStartMs: 120, LoopEndMs: 880 });
+        Check("con su volumen y su silencio", fijado is { Volume: 37, IsMuted: true });
+        Check("el panel ignora el master de la pestana (suena a master 100)", fijado?.BoardMasterVolume == 100);
+
+        Check("un sector VACIO no se fija", dock.Pin(tab, new SectorNode()) is null);
+
+        // El ultimo sector de una pestana: se VACIA en vez de desaparecer.
+        var ultimo = dock.Pin(tab, b);
+        Check("fijar el ultimo sector de la pestana lo vacia (la pestana sigue teniendo uno)",
+            ultimo is not null && tab.Root is SectorNode { HasMedia: false, IsMissing: false });
+        Check("el segundo fijado se APILA debajo", dock.Board.AllSectors.Select(s => s.MissingPath)
+            .SequenceEqual([@"D:\clips\fijo.mp4", @"D:\clips\queda.mp4"]));
+        Check("la pila es vertical y en alturas iguales",
+            dock.Board.Root is SplitNode { Orientation: SplitOrientation.Vertical, Ratio: 0.5 });
+    }
+
+    /// <summary>
+    /// DESFIJAR: el media vuelve a la pestana ACTIVA. Si el sector seleccionado esta vacio lo
+    /// llena; si tiene algo, lo PARTE (nunca pisa). La seleccion "de la pestana" es la que tenia
+    /// ANTES de que el click en el panel se la llevara (ClearSelection recuerda la ultima).
+    /// </summary>
+    private static void DesfijarVuelveALaPestanaActiva()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 13. DESFIJAR: VUELVE A LA PESTANA ACTIVA ===");
+
+        var dock = new PinnedDock();
+        var origen = new BoardViewModel();
+        var x = SectorCon(@"D:\clips\x.mp4", 50, 450, 61, false);
+        var y = SectorCon(@"D:\clips\y.mp4", 70, 770, 44, true);
+        origen.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal, x, new SplitNode(SplitOrientation.Vertical, y, new SectorNode())));
+        var enPanelX = dock.Pin(origen, x)!;
+        var enPanelY = dock.Pin(origen, y)!;
+
+        // Destino con un sector VACIO seleccionado (y la seleccion "robada" por el panel).
+        var vacio = new SectorNode();
+        var ocupado = SectorCon(@"D:\clips\ocupado.mp4", 0, 100, 50, false);
+        var activa = new BoardViewModel();
+        activa.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal, ocupado, vacio));
+        activa.Select(vacio);
+        activa.ClearSelection();   // lo que hace MainWindow al hacer click en el panel
+
+        var vuelto = dock.Unpin(enPanelX, activa);
+        Check("con el seleccionado VACIO, lo llena (no parte)", ReferenceEquals(vuelto, vacio));
+        Check("el media volvio con markers, volumen y silencio",
+            vacio is { MissingPath: @"D:\clips\x.mp4", LoopStartMs: 50, LoopEndMs: 450, Volume: 61, IsMuted: false });
+        Check("salio del panel y quedo el otro", dock.Board.AllSectors.Count() == 1 && dock.HasContent);
+        Check("la pestana no cambio de forma", activa.AllSectors.Count() == 2);
+
+        // Ahora el seleccionado TIENE algo: se parte y el media va a la mitad nueva.
+        activa.Select(ocupado);
+        activa.ClearSelection();
+        var partido = dock.Unpin(enPanelY, activa);
+        Check("con el seleccionado OCUPADO, lo parte", activa.AllSectors.Count() == 3 && partido is not null && !ReferenceEquals(partido, ocupado));
+        Check("el ocupado conserva su clip", ocupado.MissingPath == @"D:\clips\ocupado.mp4");
+        Check("la mitad nueva tiene el media", partido?.MissingPath == @"D:\clips\y.mp4" && partido.IsMuted && partido.Volume == 44);
+        Check("la mitad nueva queda seleccionada", ReferenceEquals(activa.Selected, partido));
+        Check("vaciado el panel, no tiene contenido (se esconde)", !dock.HasContent && dock.ToData() is null);
+
+        // Sin nada seleccionado y la raiz partida: se parte el board ENTERO.
+        var otro = dock.Pin(activa, ocupado)!;
+        var sinSeleccion = new BoardViewModel();
+        var r1 = SectorCon(@"D:\clips\r1.mp4", 0, 100, 50, false);
+        var r2 = SectorCon(@"D:\clips\r2.mp4", 0, 100, 50, false);
+        var raizVieja = new SplitNode(SplitOrientation.Vertical, r1, r2);
+        sinSeleccion.ReplaceRoot(raizVieja);
+        sinSeleccion.ClearSelection();
+        typeof(BoardViewModel).GetField("_lastSelected", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .SetValue(sinSeleccion, null);
+        var alRaiz = dock.Unpin(otro, sinSeleccion);
+        Check("sin seleccion: se parte la RAIZ (el board viejo queda entero a un lado)",
+            sinSeleccion.Root is SplitNode { First: var f, Second: var s2 } && ReferenceEquals(f, raizVieja) && ReferenceEquals(s2, alRaiz));
+    }
+
+    /// <summary>
+    /// El panel es del ARCHIVO: sus sectores (DTO completo) y su ancho como proporcion. Ida y
+    /// vuelta con dos sectores distintos y un ancho que no es el de por defecto.
+    /// </summary>
+    private static void PanelSobreviveAlGuardado()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 14. EL PANEL SOBREVIVE AL .mboard ===");
+
+        var dock = new PinnedDock();
+        var tab = new BoardViewModel();
+        tab.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal,
+            SectorCon(@"D:\clips\p1.mp4", 11, 222, 33, true),
+            new SplitNode(SplitOrientation.Vertical, SectorCon(@"D:\clips\p2.mp4", 44, 555, 66, false), new SectorNode())));
+        foreach (var s in tab.AllSectors.Where(s => s.IsMissing).ToList()) dock.Pin(tab, s);
+        dock.Width = 0.3;
+
+        var tabs = new List<TabData> { new("Board 1", tab.Root) };
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-panel.mboard");
+        Check("se pudo guardar", BoardStore.SaveTo(archivo, tabs, 0, dock.ToData()) is null);
+        Check("el archivo tiene el panel", File.ReadAllText(archivo).Contains("\"Dock\""));
+
+        var leido = BoardStore.LoadFrom(archivo);
+        Check("vuelve el panel", leido?.Dock is not null);
+        if (leido?.Dock is { } d)
+        {
+            Check("con su ancho", Math.Abs(d.Width - 0.3) < 0.0001);
+            Check("con sus DOS sectores, en orden", d.Sectors.Select(s => s.MissingPath)
+                .SequenceEqual([@"D:\clips\p1.mp4", @"D:\clips\p2.mp4"]));
+            Check("markers, volumen y silencio de cada uno",
+                d.Sectors[0] is { LoopStartMs: 11, LoopEndMs: 222, Volume: 33, IsMuted: true } &&
+                d.Sectors[1] is { LoopStartMs: 44, LoopEndMs: 555, Volume: 66, IsMuted: false });
+
+            var otroPanel = new PinnedDock();
+            otroPanel.Replace(d);
+            Check("cargado en un panel, se apila igual", otroPanel.Board.AllSectors.Count() == 2 && otroPanel.Width == 0.3);
+            Check("y el documento releido coincide con el archivo", BoardStore.MatchesFile(archivo, leido.Tabs, otroPanel.ToData()));
+            Check("pero sin el panel NO coincide", !BoardStore.MatchesFile(archivo, leido.Tabs));
+        }
+
+        File.Delete(archivo);
+    }
+
+    /// <summary>
+    /// Un v2 de ANTES del panel (sin el campo "Dock") carga con el panel vacio y NO se lee como
+    /// modificado. Si el panel vacio se escribiera como { Sectors: [] } en vez de ausente, todo
+    /// archivo viejo preguntaria "guardar?" al cerrarlo sin haberlo tocado.
+    /// </summary>
+    private static void V2SinPanelNoEsUnCambio()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 15. UN v2 SIN PANEL NO SE LEE COMO MODIFICADO ===");
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-sin-panel.mboard");
+        File.WriteAllText(archivo,
+            """{"Version":2,"ActiveTab":0,"Tabs":[{"Name":"Uno","Root":{"Type":"sector","Volume":80}}]}""");
+
+        var leido = BoardStore.LoadFrom(archivo);
+        Check("carga", leido is not null);
+        Check("sin panel", leido?.Dock is null);
+
+        var dock = new PinnedDock();
+        dock.Replace(leido?.Dock);
+        Check("el panel queda vacio", !dock.HasContent);
+        Check("recien abierto NO se lee como modificado",
+            leido is not null && BoardStore.MatchesFile(archivo, leido.Tabs, dock.ToData()));
+
+        File.Delete(archivo);
+    }
+
+    /// <summary>
+    /// Fijar, desfijar y mover el divisor del panel son cambios sin guardar: no preguntan en el
+    /// momento, asi que el aviso del ARCHIVO es la unica red — si no los viera, se perderian.
+    /// </summary>
+    private static void FijarYDesfijarSonCambios()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 16. FIJAR / DESFIJAR / ANCHO DEL PANEL SON CAMBIOS ===");
+
+        var tab = new BoardViewModel();
+        var a = SectorCon(@"D:\clips\c1.mp4", 0, 100, 50, false);
+        var b = SectorCon(@"D:\clips\c2.mp4", 0, 100, 50, false);
+        tab.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal, a, b));
+        var dock = new PinnedDock();
+        List<TabData> Tabs() => [new TabData("Uno", tab.Root)];
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-panel-cambios.mboard");
+        BoardStore.SaveTo(archivo, Tabs(), 0, dock.ToData());
+        Check("recien guardado, coincide", BoardStore.MatchesFile(archivo, Tabs(), dock.ToData()));
+
+        var fijado = dock.Pin(tab, a)!;
+        Check("fijar ES un cambio", !BoardStore.MatchesFile(archivo, Tabs(), dock.ToData()));
+
+        BoardStore.SaveTo(archivo, Tabs(), 0, dock.ToData());
+        Check("guardado con el panel, coincide", BoardStore.MatchesFile(archivo, Tabs(), dock.ToData()));
+
+        dock.Width = 0.4;
+        Check("mover el divisor del panel ES un cambio", !BoardStore.MatchesFile(archivo, Tabs(), dock.ToData()));
+        dock.Width = PinnedDock.DefaultWidth;
+        Check("volver al mismo ancho ya no lo es", BoardStore.MatchesFile(archivo, Tabs(), dock.ToData()));
+
+        dock.Unpin(fijado, tab);
+        Check("desfijar ES un cambio", !BoardStore.MatchesFile(archivo, Tabs(), dock.ToData()));
+
+        File.Delete(archivo);
+    }
+
+    /// <summary>
+    /// SOLO con el panel: silencia la pestana ACTIVA y el panel, y deja sonando solo el pedido,
+    /// viva donde viva. Una pestana de fondo NO se toca (esta pausada y es otro trabajo).
+    /// </summary>
+    private static void SoloAlcanzaPestanaYPanel()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 17. SOLO: PESTANA ACTIVA + PANEL ===");
+
+        var t1 = SectorCon(@"D:\clips\t1.mp4", 0, 100, 50, false);
+        var t2 = SectorCon(@"D:\clips\t2.mp4", 0, 100, 50, false);
+        var fijar = SectorCon(@"D:\clips\panel.mp4", 0, 100, 50, true);
+        var activa = new BoardViewModel();
+        activa.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal, t1, new SplitNode(SplitOrientation.Vertical, t2, fijar)));
+        var fondo = SectorCon(@"D:\clips\fondo.mp4", 0, 100, 50, false);
+        var deFondo = new BoardViewModel();
+        deFondo.ReplaceRoot(fondo);
+
+        var dock = new PinnedDock();
+        var enPanel = dock.Pin(activa, fijar)!;
+
+        dock.Solo(enPanel, activa);
+        Check("solo desde el panel: el del panel suena (estaba silenciado)", !enPanel.IsMuted);
+        Check("y la pestana activa queda silenciada", t1.IsMuted && t2.IsMuted);
+        Check("la pestana de fondo NO se toca", !fondo.IsMuted);
+
+        dock.Solo(t2, activa);
+        Check("solo desde la pestana: el panel queda silenciado", enPanel.IsMuted);
+        Check("y suena solo el pedido", !t2.IsMuted && t1.IsMuted);
+
+        // Por el camino de la vista: RequestSolo con el alcance enganchado como en MainWindow.
+        activa.SoloRequested += s => dock.Solo(s, activa);
+        dock.Board.SoloRequested += s => dock.Solo(s, activa);
+        dock.Board.RequestSolo(enPanel);
+        Check("RequestSolo desde el panel usa el alcance pestana + panel", !enPanel.IsMuted && t1.IsMuted && t2.IsMuted);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

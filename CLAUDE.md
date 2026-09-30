@@ -611,7 +611,8 @@ y un negro de 200 ms se le escapa a cualquier muestreo de pantalla. Adentro se e
 …` (volumen pedido vs. el que VLC dice tener justo después de pedirlo) y `audiostate …` (el mismo
 readback SIN escribir antes, cada ~2 s: es el que prueba que cada player tiene su volumen, ver
 "La salida de audio es DirectSound"), `move <de> <a>` / `tabdrag start|drop|cancel …` (reordenar
-pestañas) y `viewreparent <padre>` (una `BoardView` salió de un padre visual).
+pestañas), `viewreparent <padre>` (una `BoardView` salió de un padre visual) y `freeze <título>`
+(un sector se congeló: pestaña a segundo plano o arrastre de divisor; ver "Panel fijado").
 
 Regresión: `tools/test-tabs.ps1` (UI Automation + `DiagLog`). Abre UN `.mboard` v2 de tres
 pestañas (generado con `ConvertTo-Json`). Verifica el título del archivo sin "•" al abrir y
@@ -631,6 +632,72 @@ el cambio se detecta por la línea `switch` nueva del `DiagLog`. ⚠ El "•" se
   aviso de verdad es el del TÍTULO, que mira el documento entero y ve pestañas agregadas y quitadas.
 - Que **F11 esconda la tira de pestañas** está en el código pero **no está verificado**:
   `test-fullscreen.ps1` falla también en la base (el F11 por keystroke no llega).
+
+### Panel fijado: sectores a la vista en TODAS las pestañas (`Board/PinnedDock.cs`)
+
+El 📌 de la cabecera de un sector lo manda al **panel fijado**, a la derecha del área de boards,
+con un divisor para cambiarle el ancho. En un sector del panel el mismo 📌 aparece **apretado** y
+lo **desfija**. Diseño aprobado por el usuario (2026-09-30).
+
+⚠ **El panel vive FUERA de las pestañas, y es la decisión que sostiene todo.** Cada video es una
+ventana nativa que no puede cambiar de padre sin re-montarse (bug #4). En `MainWindow.xaml`,
+`DockHost` es **hermano** de `BoardHost` (las pestañas), nunca hijo: cambiar de pestaña colapsa y
+pausa lo que está en `BoardHost` y el panel ni se entera. **Nunca se pausa, nunca se congela y
+nunca se reconstruye por un cambio de pestaña.** No lo metas "adentro de la pestaña activa".
+
+El panel es un `BoardViewModel` más (`IsDock = true`), con su `BoardView` y los mismos
+`SectorView`: hereda gratis **su propio latido** (que nadie suspende), selección, congelado y la
+capa de render sin una línea de video fuera de `SectorView`. Su árbol es siempre una **pila
+vertical**: la cabecera de un sector del panel no ofrece partir, y cada fijado se apila abajo con
+alturas iguales (`Distribute`). Sin contenido (ningún sector con media o ausente) se esconde
+entero: columna y divisor en **ancho 0**.
+
+| Acción | Qué hace |
+|---|---|
+| 📌 en una pestaña | Mueve la DESCRIPCIÓN del media (`MediaSnapshot`, como el intercambio): **un** re-montaje desde donde iba, con markers, volumen y silencio. El sector se cierra en su pestaña con la lógica de siempre (el hermano ocupa el lugar; si era el último, se vacía). En el panel cae en el primer sector vacío o se apila abajo. Sin media, el 📌 ni aparece. |
+| 📌 en el panel | Vuelve a la pestaña **activa**: si el sector seleccionado (o el último que lo estuvo) está vacío, lo llena; si no, lo parte y va a la mitad nueva; sin ninguno, parte la raíz. Un re-montaje. |
+| ✕ en el panel | Cierra el sector (descarta el media), como en una pestaña. |
+| arrastrar la cabecera | El intercambio entre sectores funciona **también entre panel y pestaña**: `SwapMedia` ya era por foto, no le importa en qué board vive cada nodo. |
+| divisor pestañas ↔ panel | Congela la pestaña activa **Y** el panel (`BoardView.Begin/EndExternalResize`): el divisor mueve las ventanas nativas de los dos lados. Descongela en `DragCompleted` (también con Esc). |
+
+- **Una sola selección en toda la app** (`MainWindow.OnBoardSelectionChanged`): seleccionar en el
+  panel deselecciona la pestaña activa y viceversa, y Espacio/A/B/L/Ctrl+V actúan sobre
+  `SelectedSector` viva donde viva. ⚠ `ClearSelection` **recuerda** el último seleccionado:
+  desfijar se aprieta EN el panel y ese click ya se llevó la selección de la pestaña; sin memoria,
+  "volver junto al que tenías seleccionado" no tendría a qué volver. Cambiar de pestaña le quita la
+  selección al panel (vas a trabajar en ESA pestaña).
+- **Solo** (Shift+click en el silencio): el alcance es la **pestaña activa + el panel** — lo que está
+  sonando. Las pestañas de fondo están pausadas y no se tocan.
+- **El panel ignora el volumen general de las pestañas**: sus sectores suenan a master 100. El panel
+  es de todas las pestañas; que lo gobernara el slider de la que tenés al frente haría que el mismo
+  clip suene distinto según qué pestaña mirás.
+- **Persistencia**: el panel es del ARCHIVO, no de una pestaña: `"Dock": { "Width", "Sectors": [...] }`
+  en el `.mboard` v2, con los DTO completos de sector y el ancho como **proporción** del área de
+  boards (acotado 0.1–0.8 y redondeado a 4 decimales, igual al escribir y al normalizar). ⚠ Un panel
+  **vacío se escribe AUSENTE**, no como `Sectors: []`: si no, todo v2 anterior al panel se leería
+  como modificado al abrirlo. Fijar, desfijar y mover el divisor son cambios sin guardar. Las
+  alturas internas del panel NO se guardan: se reabre en partes iguales.
+- **Abrir / Nuevo / cerrar**: `Ctrl+O` y `Ctrl+N` reemplazan también el panel (`PinnedDock.Replace`)
+  y entra en el aviso de descarte; al abrir, sus clips quedan pendientes y arrancan cuando el panel
+  se hace visible (bug #1). El cierre rápido suelta los players del panel en paralelo con los demás.
+- **Pantalla completa**: el panel queda visible (es parte del board, no de la barra).
+
+Regresión: `tools/BoardProbe` casos 12–17 (fijar, desfijar, ida y vuelta del panel, v2 sin panel
+sin cambios, fijar/desfijar/ancho como cambios, solo pestaña + panel), vistos en rojo con una
+mutación por comportamiento. `tools/test-dock.ps1` (UI Automation + `DiagLog`, no necesita el
+escritorio quieto): abre un `.mboard` de tres pestañas con un clip en el panel, va y viene 14 veces y
+exige que el clip del panel se abra **una** vez (`open`), **nunca** se congele (`freeze`), siga
+reproduciendo con la pestaña vacía al frente (`audiostate`), y que ninguna ventana de VLC quede
+suelta. Control: los clips de las pestañas de fondo SÍ se congelan. Visto en rojo con el cambio de
+pestaña suspendiendo y re-montando el panel (13 aperturas, 13 congelados y una ventana de VLC suelta).
+
+**Límites conocidos**:
+- Fijar o desfijar **re-monta los OTROS clips** del board que cambia de forma (la pestaña de origen
+  al cerrar el sector, el panel al apilar uno más, la pestaña destino al partir): es el mismo costo
+  que partir o cerrar un sector a mano (`LayoutChanged` → `Rebuild`). Nunca lo dispara un cambio de
+  pestaña. Se va con la migración a custom rendering.
+- Vaciar con ⏏ el último sector del panel lo esconde recién en el refresco periódico (≤ 0,5 s); ✕ y
+  desfijar lo esconden en el acto.
 
 ### ⚠ Bugs ya cazados — no los revivas
 
@@ -1158,7 +1225,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | Carpeta | Qué vive ahí |
 |---|---|
 | `Layout/` | El árbol: `LayoutNode`, `SplitNode`, `SectorNode` (nodo + estado del media + loop). |
-| `Board/` | `BoardViewModel` (árbol + latido + split/close + solo + volumen general), `BoardView` (materializa el árbol a controles) y `BoardTab` (una pestaña: board + vista + archivo). |
+| `Board/` | `BoardViewModel` (árbol + latido + split/close + solo + volumen general), `BoardView` (materializa el árbol a controles), `BoardTab` (una pestaña: board + vista), `TabOrder` (reordenar) y `PinnedDock` (el panel fijado: fijar/desfijar/solo entre boards). |
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |

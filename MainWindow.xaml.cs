@@ -26,6 +26,22 @@ public partial class MainWindow : Window
 
     private BoardViewModel Board => _active!.Board;
 
+    /// <summary>
+    /// El PANEL FIJADO, a la derecha de las pestañas y compartido por todas. Es del DOCUMENTO
+    /// (se guarda en el mismo `.mboard`), no de una pestaña. Ver Board/PinnedDock.
+    /// </summary>
+    private readonly PinnedDock _dock = new();
+
+    /// <summary>La vista del panel: UNA sola, creada con la ventana, hermana de BoardHost.</summary>
+    private readonly BoardView _dockView;
+
+    /// <summary>
+    /// El sector seleccionado de TODA la app: el del panel o el de la pestaña activa. Hay uno
+    /// solo (ver <see cref="OnBoardSelectionChanged"/>), así Espacio, A/B, L y Ctrl+V saben a
+    /// quién hablarle viva donde viva.
+    /// </summary>
+    private SectorNode? SelectedSector => _dock.Board.Selected ?? Board.Selected;
+
     #region Documento: UN archivo con TODAS las pestañas
 
     /// <summary>
@@ -55,6 +71,8 @@ public partial class MainWindow : Window
 
     private List<TabData> CurrentTabs() => _tabs.Select(t => t.ToData()).ToList();
 
+    private DockData? CurrentDock() => _dock.ToData();
+
     /// <param name="startupFile">
     /// El archivo a abrir al arrancar: viene del doble click en Explorer (el shell nos pasa el
     /// path como argumento). Si no hay ninguno, la app arranca con un documento VACÍO.
@@ -65,6 +83,15 @@ public partial class MainWindow : Window
     public MainWindow(string? startupFile = null)
     {
         InitializeComponent();
+
+        // El panel ANTES que cualquier documento: abrir uno (arranque por doble click) ya puede
+        // traer sectores fijados.
+        _dockView = new BoardView(_dock.Board);
+        DockHost.Children.Add(_dockView);
+        WireBoard(_dock.Board);
+        // Cerrar (✕) el último sector del panel lo esconde en el acto. Vaciarlo con ⏏ no pasa
+        // por el layout: a ese lo esconde el refresco periódico (RefreshModified).
+        _dock.Board.LayoutChanged += ApplyDockLayout;
 
         TabList.ItemsSource = _tabs;
         LoadBlankDocument();
@@ -117,8 +144,14 @@ public partial class MainWindow : Window
     /// quedan pendientes y arrancan cuando su pestaña tiene una superficie visible. Abrir un
     /// archivo de ocho pestañas pone a decodificar UNA, no ocho.
     /// </summary>
-    private void ReplaceDocument(IReadOnlyList<TabData> tabs, int activeTab)
+    private void ReplaceDocument(IReadOnlyList<TabData> tabs, int activeTab, DockData? dock)
     {
+        // El panel PRIMERO: ReplaceRoot le selecciona un sector (Replace lo limpia enseguida), y
+        // hacerlo antes de armar las pestañas deja la selección donde tiene que quedar — en la
+        // pestaña activa.
+        _dock.Replace(dock);
+        ApplyDockLayout();
+
         foreach (var old in _tabs.ToList()) RemoveTabView(old);
         _tabs.Clear();
         _active = null;
@@ -136,13 +169,17 @@ public partial class MainWindow : Window
     /// <summary>Documento en blanco: sin archivo, una pestaña vacía con el nombre por defecto.</summary>
     private void LoadBlankDocument()
     {
+        // "Nuevo" también vacía el panel: es parte del documento, no de la ventana.
+        _dock.Replace(null);
+        ApplyDockLayout();
+
         foreach (var old in _tabs.ToList()) RemoveTabView(old);
         _tabs.Clear();
         _active = null;
         SwitchTo(AddTab(BoardTab.NextDefaultName([])));
 
         _filePath = null;
-        _savedSnapshot = BoardStore.Serialize(CurrentTabs());
+        _savedSnapshot = BoardStore.Serialize(CurrentTabs(), CurrentDock());
         foreach (var tab in _tabs) tab.SavedSnapshot = BoardStore.SerializeTab(tab.ToData());
         RefreshModified();
     }
@@ -156,7 +193,7 @@ public partial class MainWindow : Window
     {
         _filePath = path;
         var snapshot = BoardStore.ReadSnapshot(path);
-        _savedSnapshot = snapshot?.Document ?? BoardStore.Serialize(CurrentTabs());
+        _savedSnapshot = snapshot?.Document ?? BoardStore.Serialize(CurrentTabs(), CurrentDock());
         for (var i = 0; i < _tabs.Count; i++)
             _tabs[i].SavedSnapshot = snapshot is not null && i < snapshot.Tabs.Count ? snapshot.Tabs[i] : null;
         RefreshModified();
@@ -165,8 +202,12 @@ public partial class MainWindow : Window
     private void RefreshModified()
     {
         foreach (var tab in _tabs) tab.RefreshModified();
-        _isModified = BoardStore.Serialize(CurrentTabs()) != _savedSnapshot;
+        _isModified = BoardStore.Serialize(CurrentTabs(), CurrentDock()) != _savedSnapshot;
         UpdateTitle();
+
+        // ⏏ sobre el último sector del panel lo vacía sin pasar por ningún evento de layout:
+        // este refresco periódico es el que lo esconde (medio segundo de demora, sin costo).
+        ApplyDockLayout();
     }
 
     /// <summary>
@@ -178,8 +219,8 @@ public partial class MainWindow : Window
     /// </summary>
     private bool HasUnsavedWork() =>
         _filePath is null
-            ? BoardStore.Serialize(CurrentTabs()) != _savedSnapshot
-            : !BoardStore.MatchesFile(_filePath, CurrentTabs());
+            ? BoardStore.Serialize(CurrentTabs(), CurrentDock()) != _savedSnapshot
+            : !BoardStore.MatchesFile(_filePath, CurrentTabs(), CurrentDock());
 
     /// <summary>
     /// Pregunta UNA vez, por el archivo entero, antes de perder trabajo. Devuelve false si el
@@ -219,6 +260,7 @@ public partial class MainWindow : Window
     private BoardTab AddTab(string name)
     {
         var tab = new BoardTab(name);
+        WireBoard(tab.Board);
         tab.Deactivate();
         _tabs.Add(tab);
         BoardHost.Children.Add(tab.View);
@@ -261,6 +303,12 @@ public partial class MainWindow : Window
         previous?.Deactivate();
 
         tab.Activate();
+
+        // UNA selección en toda la app: cambiar de pestaña es ir a trabajar en ELLA, así que el
+        // panel suelta la suya y la pestaña recupera la que tenía. El panel en sí NO se toca:
+        // ni se pausa, ni se congela, ni se reconstruye (vive fuera de las pestañas).
+        _dock.Board.ClearSelection();
+        tab.Board.EnsureSelection();
 
         // El slider de volumen general es UNO solo en la barra y actúa sobre la pestaña ACTIVA:
         // se re-apunta al board entrante y así muestra SU valor (cada board tiene el suyo).
@@ -336,6 +384,123 @@ public partial class MainWindow : Window
         // En medio de un arrastre no se cierra nada: la pestaña arrastrada podría ser esa.
         if (_tabDrag is { Active: true }) return;
         if ((sender as FrameworkElement)?.DataContext is BoardTab tab && _tabs.Contains(tab)) CloseTab(tab);
+    }
+
+    #endregion
+
+    #region Panel fijado
+
+    /// <summary>
+    /// Engancha un board (una pestaña o el panel) a la coordinación que CRUZA boards: fijar /
+    /// desfijar, el alcance del solo, y la selección única de la app.
+    /// </summary>
+    private void WireBoard(BoardViewModel board)
+    {
+        board.PropertyChanged += OnBoardSelectionChanged;
+        board.PinRequested += OnPinRequested;
+        board.SoloRequested += sector => _dock.Solo(sector, Board);
+    }
+
+    /// <summary>
+    /// 📌 en una cabecera: desde una pestaña FIJA, desde el panel DESFIJA (vuelve a la pestaña
+    /// activa). Las dos cosas son cambios sin guardar: el panel vive en el archivo.
+    /// </summary>
+    private void OnPinRequested(BoardViewModel board, SectorNode sector)
+    {
+        if (board.IsDock) _dock.Unpin(sector, Board);
+        else _dock.Pin(board, sector);
+
+        ApplyDockLayout();
+        RefreshModified();
+    }
+
+    /// <summary>
+    /// UNA sola selección en toda la app. Seleccionar en el panel deselecciona la pestaña activa
+    /// y viceversa; si no, habría dos sectores "seleccionados" y Espacio no sabría a cuál darle
+    /// play. Solo cuenta la pestaña ACTIVA: las de fondo seleccionan su primer sector al cargar
+    /// un archivo, y eso no le puede robar la selección al panel.
+    /// </summary>
+    private void OnBoardSelectionChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(BoardViewModel.Selected)) return;
+        if (sender is not BoardViewModel { Selected: not null } board) return;
+
+        if (ReferenceEquals(board, _dock.Board)) _active?.Board.ClearSelection();
+        else if (ReferenceEquals(board, _active?.Board)) _dock.Board.ClearSelection();
+    }
+
+    private bool _dockShown;
+    private double _appliedDockWidth = double.NaN;
+
+    /// <summary>El usuario está arrastrando el divisor del panel: el refresco no le pisa las columnas.</summary>
+    private bool _dockDragging;
+
+    /// <summary>
+    /// Columnas del área de boards según el panel: sin contenido, divisor y panel miden CERO (el
+    /// panel se esconde entero); con contenido, pestañas y panel son proporciones del ancho.
+    /// Solo reescribe si algo cambió: lo llama el refresco de cada medio segundo.
+    /// </summary>
+    private void ApplyDockLayout()
+    {
+        if (_dockDragging) return;
+
+        var show = _dock.HasContent;
+        if (show == _dockShown && (!show || _appliedDockWidth == _dock.Width)) return;
+        _dockShown = show;
+        _appliedDockWidth = _dock.Width;
+
+        DockSplitter.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        // Hacerlo Visible es lo que arranca los clips pendientes del panel (abiertos desde un
+        // archivo o recién fijados): SectorView espera a una superficie VISIBLE (bug #1).
+        DockHost.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+
+        if (show)
+        {
+            TabsColumn.Width = new GridLength(1 - _dock.Width, GridUnitType.Star);
+            DockSplitterColumn.Width = new GridLength(6);
+            DockColumn.Width = new GridLength(_dock.Width, GridUnitType.Star);
+        }
+        else
+        {
+            TabsColumn.Width = new GridLength(1, GridUnitType.Star);
+            DockSplitterColumn.Width = new GridLength(0);
+            DockColumn.Width = new GridLength(0);
+        }
+    }
+
+    /// <summary>La pestaña que se congeló al empezar el arrastre: es a ELLA a la que hay que descongelar.</summary>
+    private BoardTab? _dockDragTab;
+
+    /// <summary>
+    /// Arrastrar el divisor del panel cambia el ancho de los DOS lados, así que mueve las ventanas
+    /// nativas de los dos: se congela la pestaña activa Y el panel. Mismo arreglo que el splitter
+    /// interno de un board (ver "Arrastrar un divisor CONGELA los sectores" en el CLAUDE.md).
+    /// </summary>
+    private void OnDockSplitterDragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
+    {
+        _dockDragging = true;
+        _dockDragTab = _active;
+        _dockDragTab?.View.BeginExternalResize();
+        _dockView.BeginExternalResize();
+    }
+
+    /// <summary>
+    /// ⚠ DragCompleted llega TAMBIÉN al cancelar con Esc: descongelar colgado de acá garantiza
+    /// que nunca quede nada pausado y en negro. El ancho se guarda como PROPORCIÓN.
+    /// </summary>
+    private void OnDockSplitterDragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+    {
+        _dockDragging = false;
+        _dockView.EndExternalResize();
+        _dockDragTab?.View.EndExternalResize();
+        _dockDragTab = null;
+
+        var tabs = TabsColumn.Width.Value;
+        var dock = DockColumn.Width.Value;
+        if (tabs + dock > 0) _dock.Width = dock / (tabs + dock);
+        _appliedDockWidth = double.NaN; // fuerza a reescribir las columnas con el ancho saneado
+        ApplyDockLayout();
+        RefreshModified();
     }
 
     #endregion
@@ -738,6 +903,8 @@ public partial class MainWindow : Window
             Hide();
             _modifiedRefresh.Stop();
             foreach (var tab in _tabs) tab.Board.Dispose();
+            // El panel por el MISMO camino: sus players se detienen en paralelo con los demás.
+            _dock.Dispose();
             await Task.WhenAny(VlcEngine.WhenReleased(), Task.Delay(VlcEngine.ReleaseTimeout));
         }
         finally
@@ -791,7 +958,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        ReplaceDocument(document.Tabs, document.ActiveTab);
+        ReplaceDocument(document.Tabs, document.ActiveTab, document.Dock);
         MarkSaved(full);
     }
 
@@ -823,7 +990,7 @@ public partial class MainWindow : Window
 
     private bool Write(string path)
     {
-        var error = BoardStore.SaveTo(path, CurrentTabs(), _tabs.IndexOf(_active!));
+        var error = BoardStore.SaveTo(path, CurrentTabs(), _tabs.IndexOf(_active!), CurrentDock());
         if (error is not null)
         {
             // Un "guardar" que falla en silencio es la peor mentira que le podés decir al usuario:
@@ -864,7 +1031,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void PasteMediaPath()
     {
-        if (Board.Selected is not { } sector) return;
+        if (SelectedSector is not { } sector) return;
 
         string? path = null;
         try
@@ -1121,7 +1288,7 @@ public partial class MainWindow : Window
                 return;
         }
 
-        if (Board.Selected is not { } sector) return;
+        if (SelectedSector is not { } sector) return;
 
         switch (e.Key)
         {
