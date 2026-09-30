@@ -391,9 +391,16 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// El clip vuelve REPRODUCIENDO aunque estuviera pausado. Es deliberado: re-montar pausado
     /// obliga a VLC a decodificar un frame para mostrarlo, y la mitad de las veces te deja el
     /// sector en negro — peor que la pequeña sorpresa de que arranque.
+    ///
+    /// ⚠ Un clip que TODAVÍA NO arrancó (<see cref="_pending"/> no es null) NO se re-monta.
+    /// Nunca se reprodujo en ninguna superficie, así que no hay ventana vieja de la que
+    /// rescatarlo: la vista nueva lo arranca sola vía StartPending. Re-montarlo era cargar el
+    /// archivo DOS VECES — y era el caso de TODO sector al abrir un board, porque LoadFrom deja
+    /// los clips pendientes y ReplaceRoot → Rebuild llamaba a Remount sobre cada uno.
     /// </summary>
     public void Remount()
     {
+        if (_pending is not null) return;
         if (Kind != MediaKind.Video || MediaPath is not { } path) return;
 
         var position = PositionMs;
@@ -413,22 +420,32 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         LoopEnabled = loopEnabled;
     }
 
-    /// <summary>Vacía el sector y libera el reproductor.</summary>
+    /// <summary>
+    /// Vacía el sector y libera el reproductor.
+    ///
+    /// La parte cara (el Stop() bloqueante de libvlc) NO corre acá: se delega a
+    /// <see cref="VlcEngine.Release"/>, que la hace en otro hilo y en paralelo con los demás
+    /// sectores. Todo lo que queda en este método es barato y es del hilo de UI.
+    /// </summary>
     public void Unload()
     {
+        // Un media pendiente nunca llegó a reproducirse: soltarlo es liberar un objeto, no
+        // detener nada. Barato, se queda en el hilo de UI.
         _pending?.Dispose();
         _pending = null;
 
         var player = Player;
+
+        // ⚠ ORDEN CRÍTICO: desenganchar ANTES de liberar. Player = null dispara SyncRender en la
+        // vista, que suelta el VideoView del reproductor. Recién con eso hecho se lo entrega a
+        // otro hilo para detenerlo; al revés, el render de VLC escribiría sobre una ventana
+        // que ya no existe.
         Player = null;
 
-        if (player is not null)
-        {
-            // Stop() antes de Dispose(): soltar el player mientras decodifica deja el hilo de
-            // VLC trabajando sobre memoria liberada.
-            player.Stop();
-            player.Dispose();
-        }
+        // A partir de acá el nodo ya no tiene NADA que ver con ese player: si en la misma vuelta
+        // se le carga otro clip (Load llama a Unload), el nuevo arranca mientras el viejo se
+        // detiene en paralelo, sin compartir ningún estado.
+        if (player is not null) VlcEngine.Release(player);
 
         ImageSource = null;
         MediaPath = null;

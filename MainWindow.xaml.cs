@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Threading;
 using AmpzMediaBoard.Board;
 using AmpzMediaBoard.Layout;
 using AmpzMediaBoard.Media;
@@ -50,8 +51,16 @@ public partial class MainWindow : Window
         Closing += OnClosing;
     }
 
+    /// <summary>
+    /// Segunda pasada del cierre: los reproductores ya se detuvieron (o se venció la espera) y
+    /// la ventana se puede cerrar de verdad. Ver <see cref="BeginFastClose"/>.
+    /// </summary>
+    private bool _playersReleased;
+
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        if (_playersReleased) return;
+
         if (!ConfirmDiscardChanges())
         {
             e.Cancel = true;
@@ -60,7 +69,47 @@ public partial class MainWindow : Window
 
         // No se escribe NINGÚN estado al cerrar. El único lugar donde vive un board es su
         // archivo .mboard, y ahí se escribe cuando el usuario lo pide.
-        _board.Dispose();
+        //
+        // El cierre de verdad se POSTERGA una vuelta: WPF no deja esconder una ventana desde
+        // adentro de su propio Closing (tira InvalidOperationException), y esconderla es
+        // justamente lo primero que hay que hacer. Ver BeginFastClose.
+        e.Cancel = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Send, BeginFastClose);
+    }
+
+    /// <summary>
+    /// Cierre rápido: la ventana desaparece YA y los reproductores se detienen en paralelo por
+    /// detrás.
+    ///
+    /// Bug reportado: con varios videos el cierre tardaba segundos y se veía cerrar "video por
+    /// video". Cada <c>MediaPlayer.Stop()</c> de libvlc bloquea ~100-500ms y se hacían en fila en
+    /// el hilo de UI, con la ventana visible y congelada. Ahora el Stop corre en otros hilos
+    /// (VlcEngine.Release) y el que mira solo ve la ventana irse.
+    ///
+    /// ⚠ Se ESCONDE y no se cierra hasta que terminaron los Stop. No es cosmético: cerrar
+    /// destruye los HWND de los VideoView, y un vout de VLC que todavía no se detuvo quedaría
+    /// dibujando sobre una ventana hija de una ventana muerta. Escondida, la ventana nativa
+    /// sigue viva hasta que el último player soltó su salida. Mismo invariante que
+    /// "desenganchar antes de liberar", estirado a todo el cierre.
+    ///
+    /// La espera tiene techo (<see cref="VlcEngine.ReleaseTimeout"/>): un VLC trabado no puede
+    /// dejar un proceso invisible vivo para siempre.
+    /// </summary>
+    private async void BeginFastClose()
+    {
+        try
+        {
+            Hide();
+            _board.Dispose();
+            await Task.WhenAny(VlcEngine.WhenReleased(), Task.Delay(VlcEngine.ReleaseTimeout));
+        }
+        finally
+        {
+            // En el finally: pase lo que pase, la app se termina cerrando. Una excepción acá
+            // dejaría un proceso escondido que el usuario ni ve para matarlo.
+            _playersReleased = true;
+            Close();
+        }
     }
 
     /// <summary>

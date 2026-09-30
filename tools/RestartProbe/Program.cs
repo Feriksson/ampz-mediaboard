@@ -47,6 +47,9 @@ internal static class Program
         // Caso 3: el intervalo NEGRO entre repeticiones. Ver TailGuardMs en SectorNode.
         LoopeaSinReabrirElArchivo(clip);
 
+        // Caso 4: abrir un board NO carga cada clip dos veces. Ver SectorNode.Remount.
+        RemountNoRecargaLoPendiente(clip);
+
         Console.WriteLine();
         if (_fallas == 0) Console.WriteLine("=== TODO OK ===");
         else Console.WriteLine($"=== {_fallas} FALLA(S) ===");
@@ -232,6 +235,40 @@ internal static class Program
     }
 
     /// <summary>Late el nodo cada ~33ms (el ritmo real del board) hasta que se cumpla la condición.</summary>
+    /// <summary>
+    /// Doble carga al abrir un board: LoadFrom deja cada clip PENDIENTE (bug #1: sin superficie
+    /// no se reproduce) y ReplaceRoot → BoardView.Rebuild llamaba a Remount sobre cada sector,
+    /// que volvía a hacer Load → otro MediaPlayer y otro Media para el mismo archivo.
+    ///
+    /// El discriminador es la IDENTIDAD del reproductor: Remount sobre un clip pendiente tiene
+    /// que dejar el MISMO player (no hay superficie vieja de la que rescatarlo). Y como contraprueba,
+    /// sobre un clip que YA arrancó tiene que seguir creando uno nuevo (bug #4: el player viejo
+    /// queda atado al HWND que se destruye) — sin esa mitad, "no re-montar nunca" pasaría la prueba.
+    /// </summary>
+    private static void RemountNoRecargaLoPendiente(string clip)
+    {
+        Console.WriteLine("=== Remount: un clip pendiente NO se recarga; uno arrancado SÍ ===");
+
+        using var nodo = new SectorNode();
+        nodo.Load(clip);
+        var antes = nodo.Player;
+        nodo.Remount();
+        if (!ReferenceEquals(antes, nodo.Player))
+            Fallo("Remount recargó un clip que todavía no había arrancado: abrir un board carga cada clip DOS veces");
+        else
+            Console.WriteLine("  pendiente: mismo MediaPlayer, no se recargó");
+
+        // Acá no hay vista: VLC abre su ventanita propia, igual que en los otros casos.
+        nodo.StartPending();
+        Bombear(nodo, hasta: () => nodo.DurationMs > 0, limiteMs: 5000);
+        var arrancado = nodo.Player;
+        nodo.Remount();
+        if (ReferenceEquals(arrancado, nodo.Player))
+            Fallo("Remount NO re-montó un clip que ya reproducía: quedaría dibujando en un HWND muerto (bug #4)");
+        else
+            Console.WriteLine("  arrancado: MediaPlayer nuevo, se re-montó como corresponde");
+    }
+
     private static long Bombear(SectorNode nodo, Func<bool> hasta, int limiteMs)
     {
         var arranque = Environment.TickCount64;

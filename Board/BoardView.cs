@@ -50,6 +50,8 @@ public sealed class BoardView : ContentControl
         // Y los clips se re-montan: la ventana de salida de libvlc se fija en el Play(), así que
         // un reproductor que sobrevive a la reconstrucción se queda dibujando en el HWND viejo,
         // que ya no existe. Remount() lo relanza desde donde iba. Ver SectorNode.Remount.
+        // Los clips que todavía no arrancaron (recién abiertos desde un .mboard) NO se tocan:
+        // Remount los saltea y la vista nueva los arranca. Antes se cargaban dos veces.
         foreach (var sector in SplitNode.Sectors(_board.Root))
             sector.Remount();
 

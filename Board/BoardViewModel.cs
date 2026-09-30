@@ -213,6 +213,9 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     /// <summary>Reemplaza el board entero (lo usa la carga desde disco).</summary>
     public void ReplaceRoot(LayoutNode root)
     {
+        // Dispose NO bloquea: cada sector desengancha su player acá y lo detiene en otro hilo,
+        // todos en paralelo (ver VlcEngine.Release). "Nuevo"/"Abrir" sobre un board con seis
+        // clips ya no congela la ventana medio segundo por clip.
         foreach (var sector in SplitNode.Sectors(Root))
             sector.Dispose();
 
@@ -222,6 +225,11 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         LayoutChanged?.Invoke();
     }
 
+    /// <summary>
+    /// Suelta todos los sectores. NO espera a que los reproductores terminen de detenerse: eso
+    /// corre en otros hilos (VlcEngine.Release). Quien necesite esperarlo —el cierre de la app,
+    /// antes de liberar el runtime— usa <c>VlcEngine.WhenReleased()</c>.
+    /// </summary>
     public void Dispose()
     {
         _tick.Stop();
