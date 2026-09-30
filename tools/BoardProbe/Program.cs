@@ -23,6 +23,9 @@ internal static class Program
         SoloSilenciaATodosMenosUno();
         MasterEscalaSinPisar();
         MasterSobreviveAlGuardadoYLosViejosNoCambian();
+        VariasPestanasEnUnArchivo();
+        ArchivoViejoEsUnaPestanaSinCambios();
+        RenombrarAgregarYQuitarSonCambios();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -93,10 +96,10 @@ internal static class Program
         LayoutNode raiz = new SplitNode(SplitOrientation.Horizontal, izq, der, 0.4);
 
         var archivo = Path.Combine(Path.GetTempPath(), "probe-volumen.mboard");
-        var error = BoardStore.SaveTo(archivo, raiz);
+        var error = BoardStore.SaveTo(archivo, [new TabData("Board 1", raiz)], 0);
         Check("se pudo guardar", error is null);
 
-        var leido = BoardStore.LoadFrom(archivo);
+        var leido = BoardStore.LoadFrom(archivo)?.Tabs[0].Root;
         Check("se pudo leer", leido is not null);
 
         if (leido is SplitNode split &&
@@ -220,24 +223,129 @@ internal static class Program
 
         var archivo = Path.Combine(Path.GetTempPath(), "probe-master.mboard");
         LayoutNode raiz = SectorCon(@"D:\clips\m.mp4", 10, 200, 60, false);
-        Check("se pudo guardar con master 35", BoardStore.SaveTo(archivo, raiz, 35) is null);
+        Check("se pudo guardar con master 35", BoardStore.SaveTo(archivo, [new TabData("Board 1", raiz, 35)], 0) is null);
 
-        var leido = BoardStore.LoadFrom(archivo, out var master);
-        Check("el master vuelve en 35", master == 35);
-        Check("el board releido coincide con el archivo", leido is not null && BoardStore.MatchesFile(archivo, leido, master));
+        var leido = BoardStore.LoadFrom(archivo);
+        Check("el master vuelve en 35", leido?.Tabs[0].MasterVolume == 35);
+        Check("el board releido coincide con el archivo", leido is not null && BoardStore.MatchesFile(archivo, leido.Tabs));
 
         // Sin paths adentro: un path de Windows tipeado en un JSON a mano es JSON invalido (ver
         // CLAUDE.md, test-missing). Un sector vacio alcanza para probar el campo que falta.
         var viejo = Path.Combine(Path.GetTempPath(), "probe-master-viejo.mboard");
         File.WriteAllText(viejo,
             """{"Type":"sector","Ratio":0.5,"LoopStart":0,"LoopEnd":0,"LoopEnabled":true,"Volume":60,"Muted":false}""");
-        var leidoViejo = BoardStore.LoadFrom(viejo, out var masterViejo);
-        Check("un archivo viejo (sin el campo) carga con master 100", masterViejo == 100);
-        Check("y NO se lee como modificado", leidoViejo is not null && BoardStore.MatchesFile(viejo, leidoViejo, masterViejo));
-        Check("pero mover el master SI es un cambio", leidoViejo is not null && !BoardStore.MatchesFile(viejo, leidoViejo, 50));
+        var leidoViejo = BoardStore.LoadFrom(viejo);
+        Check("un archivo viejo (sin el campo) carga con master 100", leidoViejo?.Tabs[0].MasterVolume == 100);
+        Check("y NO se lee como modificado", leidoViejo is not null && BoardStore.MatchesFile(viejo, leidoViejo.Tabs));
+        Check("pero mover el master SI es un cambio", leidoViejo is not null &&
+            !BoardStore.MatchesFile(viejo, [leidoViejo.Tabs[0] with { MasterVolume = 50 }]));
 
         File.Delete(archivo);
         File.Delete(viejo);
+    }
+
+    /// <summary>
+    /// Un .mboard v2 guarda TODAS las pestanas. Tres pestanas distintas a proposito: nombres,
+    /// master y formas de arbol diferentes, y la activa NO es la primera (el default) — si se
+    /// perdiera, volveria en 0 y el check lo ve.
+    /// </summary>
+    private static void VariasPestanasEnUnArchivo()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 8. UN ARCHIVO CON VARIAS PESTANAS (v2, ida y vuelta) ===");
+
+        var tabs = new List<TabData>
+        {
+            new("Referencias", new SplitNode(SplitOrientation.Horizontal,
+                SectorCon(@"D:\clips\r1.mp4", 10, 900, 50, false), SectorCon(@"D:\clips\r2.mp4", 0, 400, 70, true), 0.3), 40),
+            new("Tomas", SectorCon(@"D:\clips\t.mp4", 250, 1250, 90, false)),
+            new("Board 3", new SplitNode(SplitOrientation.Vertical, new SectorNode(),
+                new SplitNode(SplitOrientation.Horizontal, SectorCon(@"D:\clips\x.mp4", 5, 50, 20, false), new SectorNode(), 0.7), 0.6), 75),
+        };
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-pestanas.mboard");
+        Check("se pudo guardar", BoardStore.SaveTo(archivo, tabs, 2) is null);
+
+        var leido = BoardStore.LoadFrom(archivo);
+        Check("vuelven las TRES pestanas", leido?.Tabs.Count == 3);
+        if (leido is { Tabs.Count: 3 })
+        {
+            Check("los nombres, en orden", leido.Tabs.Select(t => t.Name).SequenceEqual(["Referencias", "Tomas", "Board 3"]));
+            Check("el master de cada una", leido.Tabs.Select(t => t.MasterVolume).SequenceEqual([40, 100, 75]));
+            Check("la pestana activa (la tercera)", leido.ActiveTab == 2);
+            Check("el layout de cada una (serializa igual pestana por pestana)",
+                tabs.Zip(leido.Tabs).All(p => BoardStore.SerializeTab(p.First) == BoardStore.SerializeTab(p.Second)));
+            Check("forma del arbol: ratio del split interno de la tercera",
+                leido.Tabs[2].Root is SplitNode { Second: SplitNode { Ratio: var r } } && Math.Abs(r - 0.7) < 0.001);
+            Check("y el documento releido coincide con el archivo", BoardStore.MatchesFile(archivo, leido.Tabs));
+        }
+
+        File.Delete(archivo);
+    }
+
+    /// <summary>
+    /// Un .mboard VIEJO (un board pelado en la raiz) carga como UNA pestana con el nombre del
+    /// archivo — y, lo que de verdad importa, NO se lee como modificado. Guardar lo reescribe en
+    /// v2, asi que si la comparacion mirara el texto, todo archivo viejo preguntaria "guardar?"
+    /// al cerrarlo sin haberlo tocado. Lleva MasterVolume en la raiz (donde lo guardaba el
+    /// formato viejo) y va compacto: ejercita la mudanza del master y la normalizacion.
+    /// </summary>
+    private static void ArchivoViejoEsUnaPestanaSinCambios()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 9. ARCHIVO VIEJO = UNA PESTANA, SIN CAMBIOS ===");
+
+        var viejo = Path.Combine(Path.GetTempPath(), "Mi board viejo.mboard");
+        File.WriteAllText(viejo,
+            """{"Type":"split","Orientation":"Vertical","Ratio":0.25,"First":{"Type":"sector","Volume":30},"Second":{"Type":"sector","Muted":true},"MasterVolume":45}""");
+
+        var leido = BoardStore.LoadFrom(viejo);
+        Check("carga", leido is not null);
+        if (leido is null) return;
+
+        Check("como UNA pestana", leido.Tabs.Count == 1);
+        Check("con el nombre del archivo", leido.Tabs[0].Name == "Mi board viejo");
+        Check("el master que estaba en la raiz se muda a la pestana", leido.Tabs[0].MasterVolume == 45);
+        Check("el layout llego", leido.Tabs[0].Root is SplitNode { Ratio: 0.25 });
+        Check("recien abierto NO se lee como modificado", BoardStore.MatchesFile(viejo, leido.Tabs));
+
+        // Guardarlo lo pasa a v2: y sigue coincidiendo consigo mismo.
+        Check("guardarlo (en v2) funciona", BoardStore.SaveTo(viejo, leido.Tabs, 0) is null);
+        Check("el archivo ahora es v2", File.ReadAllText(viejo).Contains("\"Tabs\""));
+        Check("y sigue sin leerse como modificado", BoardStore.MatchesFile(viejo, leido.Tabs));
+
+        File.Delete(viejo);
+    }
+
+    /// <summary>
+    /// Renombrar, agregar y quitar pestanas SON cambios sin guardar (no preguntan en el momento,
+    /// asi que el unico aviso es el del archivo: si no los viera, se perderian en silencio).
+    /// Cambiar de pestana, en cambio, NO lo es: mirar no es editar.
+    /// </summary>
+    private static void RenombrarAgregarYQuitarSonCambios()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 10. RENOMBRAR / AGREGAR / QUITAR PESTANAS SON CAMBIOS ===");
+
+        var uno = new TabData("Uno", SectorCon(@"D:\clips\1.mp4", 0, 100, 50, false));
+        var dos = new TabData("Dos", SectorCon(@"D:\clips\2.mp4", 0, 100, 50, false));
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-cambios.mboard");
+        BoardStore.SaveTo(archivo, [uno, dos], 0);
+
+        Check("sin tocar nada, coincide", BoardStore.MatchesFile(archivo, [uno, dos]));
+        Check("renombrar una pestana es un cambio", !BoardStore.MatchesFile(archivo, [uno with { Name = "Uno bis" }, dos]));
+        Check("agregar una pestana es un cambio",
+            !BoardStore.MatchesFile(archivo, [uno, dos, new TabData(BoardTab.NextDefaultName(["Uno", "Dos"]), new SectorNode())]));
+        Check("quitar una pestana es un cambio", !BoardStore.MatchesFile(archivo, [uno]));
+
+        // Guardado con la SEGUNDA activa: la misma lista de pestanas tiene que coincidir.
+        BoardStore.SaveTo(archivo, [uno, dos], 1);
+        Check("cambiar de pestana activa NO es un cambio", BoardStore.MatchesFile(archivo, [uno, dos]));
+
+        Check("nombre por defecto: el menor libre", BoardTab.NextDefaultName(["Board 1", "Board 3"]) == "Board 2");
+        Check("nombre por defecto en un archivo vacio", BoardTab.NextDefaultName([]) == "Board 1");
+
+        File.Delete(archivo);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

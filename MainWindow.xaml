@@ -26,13 +26,13 @@
             <Grid>
                 <StackPanel Orientation="Horizontal">
                     <Button x:Name="NewButton" Content="Nuevo" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Ctrl+N — pestaña nueva con un board vacío" />
+                            ToolTip="Ctrl+N — archivo nuevo, con una sola pestaña vacía" />
                     <Button x:Name="OpenButton" Content="Abrir board…" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Ctrl+O — abre un archivo .mboard en una pestaña" />
+                            ToolTip="Ctrl+O — abre un archivo .mboard (reemplaza TODAS las pestañas)" />
                     <Button x:Name="SaveButton" Content="Guardar" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Ctrl+S — guarda en el archivo .mboard actual" />
+                            ToolTip="Ctrl+S — guarda TODAS las pestañas en el archivo .mboard actual" />
                     <Button x:Name="SaveAsButton" Content="Guardar como…" Style="{StaticResource ToolbarButton}"
-                            ToolTip="Ctrl+Shift+S — guarda en un archivo .mboard nuevo" />
+                            ToolTip="Ctrl+Shift+S — guarda todas las pestañas en un archivo .mboard nuevo" />
 
                     <!-- Separador: lo de la izquierda es el ARCHIVO, lo de la derecha el LAYOUT.
                          Sin la línea, "Distribuir" se lee como un cuarto botón de guardado. -->
@@ -76,7 +76,7 @@
                             Style="{StaticResource ToolbarButton}" Visibility="Collapsed"
                             ToolTip="Hace que los archivos .mboard se abran con esta app al doble click" />
                     <TextBlock Foreground="#5A5A6B" FontSize="10" VerticalAlignment="Center"
-                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead  ·  Ctrl+T / Ctrl+W = pestañas  ·  F11 = pantalla completa" />
+                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead  ·  Ctrl+T / Ctrl+W = pestañas  ·  doble click = renombrar  ·  F11 = pantalla completa" />
                     <Border Width="1" Background="#2E2E3A" Margin="12,1,10,1" />
                     <!-- El texto lo pone ShowVersion() leyendo el assembly. NO se escribe acá:
                          la única fuente de verdad es <Version> en el .csproj. -->
@@ -115,32 +115,55 @@
                                      no se roba el foco — si no, el Espacio siguiente "apretaría"
                                      la pestaña en vez de dar play. -->
                                 <Button Click="OnTabClick" MouseUp="OnTabMouseUp" Focusable="False"
-                                        Cursor="Hand" ToolTip="{Binding ToolTipText}"
+                                        MouseDoubleClick="OnTabDoubleClick"
+                                        Cursor="Hand" ToolTip="Doble click para renombrar"
                                         AutomationProperties.AutomationId="BoardTab"
-                                        AutomationProperties.Name="{Binding Header}">
+                                        AutomationProperties.Name="{Binding Name}">
                                     <Button.Template>
                                         <ControlTemplate TargetType="Button">
                                             <Border x:Name="Bg" Background="#1F1F28" CornerRadius="4,4,0,0"
                                                     Padding="10,0,4,0" Height="26" Margin="0,0,2,0"
                                                     BorderThickness="0,2,0,0" BorderBrush="Transparent">
                                                 <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="{Binding Header}" MaxWidth="160"
+                                                    <TextBlock Text="{Binding Name}" MaxWidth="160"
                                                                TextTrimming="CharacterEllipsis"
                                                                VerticalAlignment="Center" FontSize="11"
                                                                Foreground="{StaticResource DimTextBrush}"
                                                                x:Name="Label" />
-                                                    <!-- Cambios sin guardar. Mismo símbolo que VS Code. -->
+                                                    <!-- Renombrar EN LÍNEA (doble click). El texto NO está
+                                                         bindeado a Name a propósito: se copia al abrir y se
+                                                         confirma a mano (Enter o perder el foco), así Esc
+                                                         puede cancelar sin haber tocado nada. Ver
+                                                         MainWindow.OnRenameBox*. -->
+                                                    <TextBox x:Name="RenameBox" Visibility="Collapsed" MinWidth="80" MaxWidth="200"
+                                                             FontSize="11" VerticalAlignment="Center" Padding="2,0"
+                                                             Background="{StaticResource WindowBrush}"
+                                                             Foreground="{StaticResource TextBrush}"
+                                                             CaretBrush="{StaticResource TextBrush}"
+                                                             BorderBrush="{StaticResource AccentBrush}" BorderThickness="1"
+                                                             AutomationProperties.Name="Nombre de la pestaña"
+                                                             IsVisibleChanged="OnRenameBoxVisibleChanged"
+                                                             KeyDown="OnRenameBoxKeyDown"
+                                                             LostKeyboardFocus="OnRenameBoxLostFocus" />
+                                                    <!-- Esta pestaña cambió desde el último guardado. Mismo
+                                                         símbolo que VS Code. El aviso de verdad es el del
+                                                         TÍTULO: ese mira el archivo entero, que además ve
+                                                         pestañas agregadas y quitadas. -->
                                                     <TextBlock Text="•" Margin="5,0,0,0" FontSize="13"
                                                                VerticalAlignment="Center"
                                                                Foreground="{StaticResource WarnBrush}"
                                                                Visibility="{Binding IsModified, Converter={StaticResource BoolToVisibility}}" />
                                                     <Button Content="×" Click="OnTabCloseClick" Focusable="False"
                                                             Style="{StaticResource IconButton}" Margin="6,0,0,0"
-                                                            ToolTip="Cerrar pestaña (Ctrl+W)"
+                                                            ToolTip="Quitar la pestaña del archivo (Ctrl+W). No pregunta: queda como cambio sin guardar"
                                                             AutomationProperties.Name="Cerrar pestaña" />
                                                 </StackPanel>
                                             </Border>
                                             <ControlTemplate.Triggers>
+                                                <DataTrigger Binding="{Binding IsRenaming}" Value="True">
+                                                    <Setter TargetName="Label" Property="Visibility" Value="Collapsed" />
+                                                    <Setter TargetName="RenameBox" Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
                                                 <DataTrigger Binding="{Binding IsActive}" Value="True">
                                                     <Setter TargetName="Bg" Property="Background" Value="{StaticResource SectorBrush}" />
                                                     <Setter TargetName="Bg" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
@@ -160,7 +183,7 @@
 
                 <Button x:Name="NewTabButton" Grid.Column="1" Content="+" Style="{StaticResource IconButton}"
                         Width="26" Height="24" FontSize="15" Focusable="False" VerticalAlignment="Top"
-                        ToolTip="Ctrl+T — pestaña nueva con un board vacío"
+                        ToolTip="Ctrl+T — agrega una pestaña al archivo"
                         AutomationProperties.Name="Pestaña nueva" />
             </Grid>
         </Border>

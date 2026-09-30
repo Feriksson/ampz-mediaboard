@@ -2,8 +2,11 @@
 # la pestana que se va se PAUSA y se COLAPSA (no se destruye) y la que vuelve se DESPAUSA (no se
 # reconstruye). Ver BoardTab.Activate/Deactivate y BoardView.SetSuspended.
 #
-# Tres boards abiertos por linea de comandos (cada argumento .mboard abre en su pestana, la
-# primera queda visible): A y B con N sectores de video cada uno, C VACIO. Verifica:
+# UN archivo .mboard (v2) con TRES pestanas, abierto por linea de comandos; la activa guardada es
+# la primera: A y B con N sectores de video cada uno, C VACIA. Verifica:
+#   0. El archivo abre con sus tres pestanas y el titulo es el del ARCHIVO, SIN la marca "•" de
+#      cambios: recien abierto no hay nada que guardar. Al final se vuelve a mirar: cambiar de
+#      pestana es mirar, no editar, y tampoco puede marcar el archivo como modificado.
 #   1. Tiempo de cambio de pestana, medido ADENTRO de la app (linea `switch` del DiagLog: desde
 #      que arranca SwitchTo hasta despues del layout de la pestana nueva). El tiempo de punta a
 #      punta por UI Automation (Invoke -> titulo nuevo) se informa pero NO se juzga: la llamada
@@ -35,7 +38,9 @@
 #
 # ⚠ Se maneja por UI Automation (InvokePattern sobre el boton de la pestana), NO con
 #   SendKeys/AppActivate: esos no llegan a la ventana de forma confiable (ver CLAUDE.md).
-# ⚠ Los .mboard se generan con ConvertTo-Json (backslashes escapados) y con LoopEnd FIJO: con
+# ⚠ El titulo ya NO sirve para saber que pestana se ve: es el del ARCHIVO, igual para todas. El
+#   cambio se detecta por la linea `switch` nueva del DiagLog.
+# ⚠ El .mboard se genera con ConvertTo-Json (backslashes escapados) y con LoopEnd FIJO: con
 #   LoopEnd=0 el primer tick completa la zona y el board queda "modificado" -> dialogo al cerrar.
 #
 #   powershell -File tools/test-tabs.ps1
@@ -100,13 +105,16 @@ function New-Tree([int]$n, [int]$depth) {
 }
 
 $utf8 = New-Object System.Text.UTF8Encoding($false)
-$boardA = Join-Path $env:TEMP 'ampz-tabs-a.mboard'
-$boardB = Join-Path $env:TEMP 'ampz-tabs-b.mboard'
-$boardC = Join-Path $env:TEMP 'ampz-tabs-c.mboard'
-$json = (New-Tree $Sectors 0) | ConvertTo-Json -Depth 30
-[System.IO.File]::WriteAllText($boardA, $json, $utf8)
-[System.IO.File]::WriteAllText($boardB, $json, $utf8)
-[System.IO.File]::WriteAllText($boardC, ([ordered]@{ Type = 'sector' } | ConvertTo-Json), $utf8)
+$board = Join-Path $env:TEMP 'ampz-tabs.mboard'
+$doc = [ordered]@{
+    Version = 2; ActiveTab = 0
+    Tabs = @(
+        [ordered]@{ Name = 'A'; Root = New-Tree $Sectors 0 },
+        [ordered]@{ Name = 'B'; Root = New-Tree $Sectors 0 },
+        [ordered]@{ Name = 'C'; Root = [ordered]@{ Type = 'sector' } }
+    )
+}
+[System.IO.File]::WriteAllText($board, ($doc | ConvertTo-Json -Depth 40), $utf8)
 
 $diagLog = Join-Path $env:TEMP 'ampz-tabs-diag.log'
 Remove-Item $diagLog -ErrorAction SilentlyContinue
@@ -118,7 +126,7 @@ Start-Sleep -Milliseconds 800
 
 # El proceso hijo hereda la variable: asi se prende el DiagLog SOLO para esta corrida.
 $env:AMPZ_DIAG_LOG = $diagLog
-$p = Start-Process -FilePath $exe -ArgumentList "`"$boardA`"", "`"$boardB`"", "`"$boardC`"" -PassThru
+$p = Start-Process -FilePath $exe -ArgumentList "`"$board`"" -PassThru
 Remove-Item Env:\AMPZ_DIAG_LOG
 $null = $p.Handle
 
@@ -132,6 +140,9 @@ for ($i = 0; $i -lt 80; $i++) {
 if ($h -eq [IntPtr]::Zero) { Write-Host 'FALLO: la ventana nunca aparecio'; exit 1 }
 
 function Title { [TabsWin32]::Text($h) }
+# La marca de cambios sin guardar, por codigo: el .ps1 va sin BOM y PowerShell 5.1 lo leeria como
+# ANSI, asi que un "•" literal en un string no coincidiria nunca con el del titulo.
+$punto = [string][char]0x2022
 
 # CPU del proceso en una ventana de tiempo, en ms de CPU por segundo de reloj.
 function Get-CpuRate([double]$seconds = 3) {
@@ -169,13 +180,16 @@ Write-Host ''
 Write-Host "=== 0. ARRANQUE ($Sectors sectores por pestana) ==="
 Write-Host "  titulo: '$(Title)'"
 if ((Title) -eq 'Ampz MediaBoard') { Write-Host 'FALLO: hay un MessageBox arriba.'; Stop-Process -Id $p.Id -Force; exit 1 }
-if ((Title) -notlike '*ampz-tabs-a*') { Write-Host 'FALLO: la pestana visible no es A.'; Stop-Process -Id $p.Id -Force; exit 1 }
+if ((Title) -notlike 'ampz-tabs*') { Write-Host 'FALLO: el titulo no es el del archivo.'; Stop-Process -Id $p.Id -Force; exit 1 }
+if ((Title).Contains($punto)) { Fallo 'recien abierto, el archivo ya figura con cambios sin guardar' }
+else { Ok 'recien abierto, sin cambios sin guardar' }
 
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
 $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'BoardTab')
 $tabs = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
-Write-Host "  pestanas: $($tabs.Count)  ($(@($tabs | ForEach-Object { $_.Current.Name }) -join ', '))"
-if ($tabs.Count -ne 3) { Write-Host 'FALLO: se esperaban 3 pestanas (una por argumento).'; Stop-Process -Id $p.Id -Force; exit 1 }
+$nombres = @($tabs | ForEach-Object { $_.Current.Name }) -join ', '
+Write-Host "  pestanas: $($tabs.Count)  ($nombres)"
+if ($tabs.Count -ne 3 -or $nombres -ne 'A, B, C') { Write-Host 'FALLO: se esperaban las 3 pestanas del archivo (A, B, C).'; Stop-Process -Id $p.Id -Force; exit 1 }
 
 $opensInicio = Get-Opens
 Write-Host "  Media creados al abrir: $opensInicio (esperado: $(2 * $Sectors))"
@@ -190,25 +204,26 @@ $switchesInicio = (Get-Diag 'switch').Count
 Write-Host "  CPU con A visible (B pendiente), en regimen: $cpuA ms/s"
 
 $script:invokeMs = @()
-# Invoke + espera del titulo. Devuelve los ms del cambio.
-function Switch-To([int]$index, [string]$expect) {
+# Invoke + espera de la linea `switch` nueva. Devuelve los ms del cambio.
+function Switch-To([int]$index) {
+    $antes = (Get-Diag 'switch').Count
     $inv = $tabs[$index].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $inv.Invoke()
     $script:invokeMs += $sw.ElapsedMilliseconds
-    while ((Title) -notlike "*$expect*" -and $sw.ElapsedMilliseconds -lt 5000) { Start-Sleep -Milliseconds 1 }
+    while ((Get-Diag 'switch').Count -le $antes -and $sw.ElapsedMilliseconds -lt 5000) { Start-Sleep -Milliseconds 5 }
     return $sw.ElapsedMilliseconds
 }
 
 Write-Host ''
 Write-Host '=== 1. A -> B (primera vez: los clips de B arrancan recien ahora) ==='
-$t1 = Switch-To 1 'ampz-tabs-b'
+$t1 = Switch-To 1
 Write-Host "  cambio en $t1 ms"
 Start-Sleep -Seconds 4   # que B abra sus clips y reproduzca: B tiene que haber estado VIVA antes de pausarse
 
 Write-Host ''
 Write-Host '=== 2. B -> C (vacia): A y B tienen que estar PAUSADAS ==='
-$t2 = Switch-To 2 'ampz-tabs-c'
+$t2 = Switch-To 2
 Write-Host "  cambio en $t2 ms"
 Start-Sleep -Seconds 2
 $cpuC = Get-CpuRate 5
@@ -221,11 +236,11 @@ Write-Host ''
 Write-Host '=== 3. IDA Y VUELTA (A, B, C, 3 veces): tiempos y aperturas ==='
 $tiempos = @($t1, $t2)
 for ($k = 0; $k -lt 3; $k++) {
-    $tiempos += Switch-To 0 'ampz-tabs-a'; Start-Sleep -Milliseconds 700
-    $tiempos += Switch-To 1 'ampz-tabs-b'; Start-Sleep -Milliseconds 700
-    $tiempos += Switch-To 2 'ampz-tabs-c'; Start-Sleep -Milliseconds 700
+    $tiempos += Switch-To 0; Start-Sleep -Milliseconds 700
+    $tiempos += Switch-To 1; Start-Sleep -Milliseconds 700
+    $tiempos += Switch-To 2; Start-Sleep -Milliseconds 700
 }
-$tiempos += Switch-To 0 'ampz-tabs-a'
+$tiempos += Switch-To 0
 Start-Sleep -Milliseconds 500
 $todos = @(Get-Diag 'switch' | Select-Object -Skip $switchesInicio | ForEach-Object { [int]($_ -split ' ')[1] })
 Write-Host "  primera vez que se muestra B (apertura diferida, informativo): $($todos[0]) ms"
@@ -265,8 +280,15 @@ $sueltas = [TabsWin32]::Unowned($p.Id, $h)
 if ($sueltas.Count -gt 0) { Fallo "ventanas sin duenio: $($sueltas -join ' | ')" }
 else { Ok 'todas las ventanas extra son owned por la principal' }
 
+Write-Host ''
+Write-Host '=== 6. CAMBIAR DE PESTANA NO ES UN CAMBIO SIN GUARDAR ==='
+Start-Sleep -Milliseconds 700   # la marca se refresca cada 500 ms
+Write-Host "  titulo: '$(Title)'"
+if ((Title).Contains($punto)) { Fallo 'despues de ir y volver entre pestanas el archivo figura modificado' }
+else { Ok 'el archivo sigue sin cambios' }
+
 Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-Remove-Item $boardA, $boardB, $boardC, $diagLog -ErrorAction SilentlyContinue
+Remove-Item $board, $diagLog -ErrorAction SilentlyContinue
 
 Write-Host ''
 if ($fallas -eq 0) { Write-Host '=== TODO OK ==='; exit 0 }

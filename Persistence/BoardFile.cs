@@ -90,14 +90,15 @@ public static class BoardFile
     }
 
     /// <summary>
-    /// Los boards que llegaron por línea de comandos y existen, en orden. Lo usa el doble click
-    /// en Explorer (un solo path) y abrir varios a la vez (<c>AmpzMediaBoard.exe a.mboard b.mboard</c>):
-    /// cada uno va a su propia pestaña.
+    /// El board que llegó por línea de comandos (el doble click en Explorer pasa UN path), o null.
+    ///
+    /// UNO solo, a propósito: un archivo es una ventana. Las pestañas viven ADENTRO del archivo,
+    /// así que dos archivos a la vez son dos ventanas — dos instancias, que es el caso de uso
+    /// buscado de la multi-instancia. Si llegan varios, se toma el primero válido.
     /// </summary>
-    public static IReadOnlyList<string> FromCommandLine(string[] args) =>
-        args.Where(a =>
-                !a.StartsWith('-') &&
-                Path.GetExtension(a).Equals(Extension, StringComparison.OrdinalIgnoreCase) &&
-                File.Exists(a))
-            .ToList();
+    public static string? FromCommandLine(string[] args) =>
+        args.FirstOrDefault(a =>
+            !a.StartsWith('-') &&
+            Path.GetExtension(a).Equals(Extension, StringComparison.OrdinalIgnoreCase) &&
+            File.Exists(a));
 }

@@ -498,14 +498,9 @@ default es 8, el tope de uso previsto.
 
 ### Pestañas: varios boards en la misma ventana (commit 594f24e)
 
-> ⚠ **El modelo de PERSISTENCIA de las pestañas se está rediseñando**: hoy cada pestaña es su
-> propio `.mboard`, y la decisión del usuario es que **un solo archivo declare TODAS las
-> pestañas**. Por eso acá se documenta SOLO la mecánica en runtime; las reglas de
-> abrir/cerrar/guardar por archivo van a cambiar y no se fijan todavía como ley.
-
-**`BoardTab`** (`Board/BoardTab.cs`) es todo el estado por-board que antes vivía suelto en
-`MainWindow`: su `BoardViewModel`, su `BoardView`, su archivo y su título. La vista se crea **UNA
-vez** y vive lo mismo que la pestaña.
+**`BoardTab`** (`Board/BoardTab.cs`) es el estado por-board: su `BoardViewModel`, su `BoardView`
+y su **nombre**. El ARCHIVO no es de la pestaña: es del documento (ver "Un archivo, TODAS las
+pestañas", abajo). La vista se crea **UNA vez** y vive lo mismo que la pestaña.
 
 **Se cambia de pestaña por `Visibility`, no reconstruyendo.** Las `BoardView` de TODAS las
 pestañas viven apiladas en `BoardHost`; la inactiva está `Collapsed` (no `Hidden`: `Hidden` sigue
@@ -539,27 +534,65 @@ Una pestaña de SEGUNDO PLANO está **suspendida** (`BoardTab.Deactivate` → `B
 Al cerrar la ventana, el cierre rápido suelta los boards de TODAS las pestañas: todos sus players
 se detienen en paralelo y el cierre sigue costando lo del Stop más lento, no la suma.
 
+#### Un archivo, TODAS las pestañas (decisión del usuario, 2026-09-30)
+
+Un `.mboard` guarda **todas las pestañas de la ventana**. El primer diseño (commit 594f24e: cada
+pestaña su propio `.mboard`) fue corregido por el usuario: el archivo es el DOCUMENTO y las
+pestañas viven adentro. Dos archivos a la vez = dos ventanas (multi-instancia, ya buscada).
+
+La ruta, la foto guardada y el "¿hay cambios?" viven en `MainWindow` (región "Documento"), no en
+las pestañas:
+
+| Acción | Qué hace |
+|---|---|
+| `Ctrl+T` / `+` | Agrega una pestaña **al archivo**, nombre "Board N" con el **menor N libre** (`BoardTab.NextDefaultName`; "cantidad + 1" repetiría nombres al cerrar una del medio). Es un cambio sin guardar. |
+| `Ctrl+W` / × / click del medio | **Quita** la pestaña **sin preguntar**: queda como cambio sin guardar, y "No guardar" la devuelve. Quitar la última deja una vacía. Sus players se sueltan por el camino que no bloquea. |
+| doble click en la pestaña | Renombrar en línea. Enter o click afuera confirma, Esc cancela, vacío revierte. Es un cambio sin guardar (el nombre se persiste). |
+| `Ctrl+S` / `Ctrl+Shift+S` | Guarda TODAS las pestañas en UN archivo, siempre en formato v2. |
+| `Ctrl+O` | **Reemplaza el documento entero** (con el aviso del actual) y libera todas las pestañas. |
+| `Ctrl+N` | Archivo nuevo con una sola pestaña vacía (con el aviso). |
+| cerrar la ventana | **UN** aviso por el archivo (Guardar / No guardar / Cancelar). No hay avisos por pestaña. |
+
+⚠ **Click afuera tiene que confirmar el renombre, y el `LostKeyboardFocus` NO alcanza** (visto
+en la prueba): en WPF, un click sobre algo NO enfocable —casi todo el board— no mueve el foco de
+teclado, y la caja quedaba abierta con el texto sin confirmar. Lo resuelve el `PreviewMouseDown`
+de la ventana (`OnWindowPreviewMouseDown`) y el `Deactivated`. Mientras se escribe, los atajos se
+saltean (`Keyboard.FocusedElement is TextBox`): si no, una "A" movería el marker de loop.
+
+**La pestaña activa se persiste** (`ActiveTab`) y se restaura al abrir, pero **NO cuenta como
+cambio sin guardar**: cambiar de pestaña es mirar, no editar. Si contara, cada `Ctrl+Tab` haría
+preguntar "¿guardar?" al cerrar. Se escribe en el próximo guardado de verdad.
+
+**Abrir un archivo de varias pestañas no pone a decodificar todas**: las pestañas nacen en
+segundo plano, cada clip queda PENDIENTE (`SectorNode.Load` no reproduce) y arranca recién cuando
+su pestaña se muestra por primera vez. Solo la activa decodifica al abrir.
+
 **`DiagLog`** (`DiagLog.cs`): log de diagnóstico **apagado salvo que `AMPZ_DIAG_LOG` apunte a un
 archivo** — el usuario nunca ve un log que no pidió. Existe porque hay hechos que desde afuera no
 se miden con confianza y desde adentro son triviales: el costo de un cambio de pestaña medido por
 UI Automation mezcla el marshaling entre procesos (medido: hasta 250 ms la llamada `Invoke` sola),
 y un negro de 200 ms se le escapa a cualquier muestreo de pantalla. Adentro se escribe `switch
-<ms>` (cambio de pestaña), `open <path>` (cada `Media` creado, para contar re-aperturas) y `audio
-…` (volumen pedido vs. el que VLC dice tener, ver "Audio por sector").
+<ms>` (cambio de pestaña), `open <path>` (cada `Media` creado, para contar re-aperturas), `audio
+…` (volumen pedido vs. el que VLC dice tener justo después de pedirlo) y `audiostate …` (el mismo
+readback SIN escribir antes, cada ~2 s: es el que prueba que cada player tiene su volumen, ver
+"La salida de audio es DirectSound").
 
-Regresión: `tools/test-tabs.ps1` (UI Automation + `DiagLog`). Verifica cambio < 100 ms en la app,
-pestañas inactivas pausadas (CPU con la pestaña vacía visible < CPU de UNA pestaña reproduciendo),
-0 re-aperturas al ir y volver, video vivo al volver, y ninguna ventana de VLC suelta. Visto en rojo
-sin la pausa y con reconstrucción.
+Regresión: `tools/test-tabs.ps1` (UI Automation + `DiagLog`). Abre UN `.mboard` v2 de tres
+pestañas (generado con `ConvertTo-Json`). Verifica el título del archivo sin "•" al abrir y
+después de ir y volver, cambio < 100 ms en la app, pestañas inactivas pausadas (CPU con la pestaña
+vacía visible < CPU de UNA pestaña reproduciendo), 0 re-aperturas al ir y volver, video vivo al
+volver, y ninguna ventana de VLC suelta. Visto en rojo sin la pausa, con reconstrucción, y con la
+pestaña activa contando como cambio. ⚠ El título ya no dice qué pestaña se ve (es el del archivo):
+el cambio se detecta por la línea `switch` nueva del `DiagLog`. ⚠ El "•" se compara por código
+(`[char]0x2022`): el `.ps1` va sin BOM y PowerShell 5.1 leería un "•" literal como ANSI.
 
 **Límites conocidos** (medidos, no resueltos):
 - La **primera vez** que se muestra una pestaña abierta en segundo plano tarda **0,7–3,5 s**: su
   primera pasada de layout crea los `VideoView` y sus ventanas nativas. Es el costo de ABRIR un
   board, diferido; los cambios siguientes son instantáneos.
 - Una pestaña **pausada NO es gratis**: ~90–230 ms/s de CPU (un player pausado sigue vivo).
-- **"Guardar como" sobre un archivo que está abierto en OTRA pestaña no está protegido**: las dos
-  pestañas quedarían apuntando al mismo archivo y se pisarían. (Queda atado al rediseño de la
-  persistencia.)
+- El "•" de cada PESTAÑA es barato (foto por pestaña tomada al abrir/guardar, por índice); el
+  aviso de verdad es el del TÍTULO, que mira el documento entero y ve pestañas agregadas y quitadas.
 - Que **F11 esconda la tira de pestañas** está en el código pero **no está verificado**:
   `test-fullscreen.ps1` falla también en la base (el F11 por keystroke no llega).
 
@@ -701,21 +734,32 @@ sector y su slider no se tocan, así la MEZCLA se conserva — 80 contra 20 sigu
   entra un sector al board (`Split`, `ReplaceRoot`): uno que no lo recibe suena al 100 % sin aviso.
 - Cambiar el master re-aplica el audio de todo el board en el acto; es la misma entrada que
   "cambió la propiedad", así que los TRES momentos de arriba siguen cubriéndolo.
-- Se persiste en el `.mboard` como `MasterVolume` del **board** (hoy, el nodo raíz del archivo).
+- Se persiste en el `.mboard` como `MasterVolume` de **cada pestaña** (en el formato viejo vivía
+  en el nodo raíz; al leerlo se muda a la pestaña).
   ⚠ Se escribe **solo si difiere de 100**, y la normalización de `MatchesFile` aplica la misma
   regla. Si se escribiera siempre, un archivo viejo (sin el campo) serializaría distinto que el
   mismo board en memoria, y abrir-y-cerrar sin tocar nada preguntaría "¿guardar?".
 - No viaja en `MediaSnapshot` (es del board, no del clip). Sin botón de mute propio: bajarlo a 0
   ya calla el board.
 
-⚠ **Hallazgo abierto (2026-09-30), NO resuelto: el volumen y el mute de VLC parecen COMPARTIDOS
-entre todos los players del proceso.** Con la salida de audio por defecto (mmdevice/WASAPI),
-leyendo `player.Volume`/`player.Mute` por `DiagLog` justo después de aplicarlos, cada sector
-devuelve el valor que acaba de poner el OTRO (sector a 80 lee 10, un sector sin mute lee
-`Mute=True`): gana el último que escribe. Pasa igual con el master en 100, o sea que es
-**anterior** al master y afecta al volumen por sector, al mute y al solo. Con `--aout=directsound`
-cada player conserva lo suyo. Es evidencia por readback, no por oído: confirmarlo escuchando antes
-de cambiar el motor de audio (decisión aparte, no tomada).
+### ⚠ La salida de audio es DirectSound (`--aout=directsound`) — no la saques
+
+Con la salida por defecto de VLC en Windows (**mmdevice/WASAPI**) el volumen y el mute que le
+pedís a UN `MediaPlayer` se aplican a la **sesión de audio del PROCESO**, que es una sola. Todos
+los players comparten el mismo control y gana el último que escribe: medido por readback, un
+sector a 20 leía 3 y uno sin mute leía `Mute=True`. Eso dejaba **muertos** el volumen por sector,
+el solo y el volumen general — todo lo de esta sección. Con `--aout=directsound`
+(`VlcEngine.Create`) cada player tiene su buffer y su volumen propios.
+
+Regresión: `tools/test-audio.ps1`. Board de 3 sectores con volúmenes y mutes distintos, y la línea
+`audiostate` del `DiagLog` (`SectorNode.DiagAudioState`, cada ~2 s desde el latido), que **lee
+sin escribir antes**. Visto en ROJO sin la opción (dos de tres sectores leían el valor del último)
+y en verde con ella. Sirve también de cordura de que el audio suena: `vlc=-1` significaría que la
+salida nunca se creó.
+⚠ La línea `audio` de `ApplyAudio` NO sirve para esto: lee justo después de escribir, y con el
+control compartido igual devuelve lo recién puesto — un verde que no puede ponerse rojo.
+⚠ Mirar qué plugin de salida cargó el proceso tampoco: el escaneo de VLC carga TODOS los DLL de
+plugins, con o sin la opción.
 
 ### Drag & drop y el HWND
 
@@ -763,7 +807,7 @@ pierde — no hay red de recuperación. Es el precio del arranque limpio y está
 
 | Archivo | Dónde | Contenido |
 |---|---|---|
-| `*.mboard` | donde el usuario quiera | El único lugar donde vive un board: árbol de layout + archivo por sector + markers. |
+| `*.mboard` | donde el usuario quiera | El único lugar donde viven los boards: TODAS las pestañas de la ventana (nombre, volumen general, árbol de layout + archivo por sector + markers) y cuál estaba activa. |
 | `ampz-crash.log` | junto al **exe** | Si el problema fuera el acceso al perfil del usuario, en `%APPDATA%` no podríamos escribir. |
 
 ### La extensión `.mboard` y el doble click (`Persistence/BoardFile.cs`)
@@ -790,7 +834,26 @@ Después de escribir el registro se llama a `SHChangeNotify(SHCNE_ASSOCCHANGED)`
 nuevo tarda en aparecer en Explorer, o no aparece hasta reiniciarlo.
 
 El doble click llega como **argumento de línea de comandos** (`App.OnStartup` → `e.Args` →
-`BoardFile.FromCommandLine`). Si hay un `.mboard` válido ahí se abre ese; si no, board vacío.
+`BoardFile.FromCommandLine`). Si hay un `.mboard` válido ahí se abre ese —con todas sus
+pestañas—; si no, documento vacío. Se toma **UNO solo**: un archivo es una ventana, y dos
+archivos a la vez son dos instancias. (Con el diseño viejo de un archivo por pestaña, varios
+argumentos abrían varias pestañas; eso se sacó.)
+
+### Formato del `.mboard`: v2, y el viejo se sigue leyendo (`BoardStore`)
+
+```
+{ "Version": 2, "ActiveTab": 0,
+  "Tabs": [ { "Name": "Board 1", "MasterVolume": 40, "Root": { …árbol… } }, … ] }
+```
+
+- **Se escribe SIEMPRE v2.** El formato VIEJO (un solo board: el árbol pelado en la raíz del
+  JSON, con `MasterVolume` en el nodo raíz) se **lee** como UNA pestaña con el nombre del archivo;
+  el master se muda a la pestaña.
+- **El formato se detecta MIRANDO el JSON** (¿hay `Tabs` o `Version` en la raíz?), no probando un
+  parseo y cayendo al otro en el `catch`. Probar a ciegas confundiría "formato viejo" con "v2
+  roto": un v2 roto leído como board viejo cargaría un board VACÍO en silencio, que al guardar
+  pisaría el archivo bueno. Un v2 sin pestañas se trata como corrupto por lo mismo.
+- `MasterVolume` se escribe solo si difiere de 100 (misma regla que antes, ver "Audio por sector").
 
 ### ⚠ MULTI-INSTANCIA ES INTENCIONAL — no le pongas un mutex
 
@@ -809,13 +872,19 @@ ese problema murió con la sesión.)
 ### Cambios sin guardar (`MainWindow.ConfirmDiscardChanges`)
 
 Es lo que hace SEGURO no tener sesión. Guarda **tres puertas** — cerrar la ventana, "Nuevo" y
-"Abrir" — y cubre **dos casos**:
+"Abrir" — y pregunta **UNA vez, por el archivo entero** (quitar una pestaña no pregunta: es un
+cambio sin guardar más, y este aviso lo cubre). Cubre **dos casos**:
 
-| Estado del board | Qué hace |
+| Estado del documento | Qué hace |
 |---|---|
-| Con archivo `.mboard` | Compara contra el archivo; si difiere, avisa. |
-| Sin archivo, con contenido | Avisa que nunca se guardó. |
-| Sin archivo y vacío | No pregunta: no hay nada que perder. |
+| Con archivo `.mboard` | Compara TODAS las pestañas contra el archivo en disco; si difiere, avisa. |
+| Sin archivo, distinto del documento en blanco | Avisa que nunca se guardó. |
+| Sin archivo y en blanco (una pestaña vacía "Board 1") | No pregunta: no hay nada que perder. |
+
+"Distinto del documento en blanco" se decide con la MISMA comparación que con archivo: sin
+archivo, la foto guardada ES la serialización del documento en blanco. Así una pestaña agregada,
+un nombre cambiado o un clip cargado cuentan igual con y sin archivo. El título lleva la marca
+(`<archivo> • — AMB`) con el mismo criterio, refrescada cada 500 ms.
 
 Diálogo Guardar / No guardar / Cancelar; Cancelar hace `e.Cancel = true` y la ventana se queda.
 Por eso `Save`, `SaveAs` y `Write` devuelven `bool`: si el guardado falla o el usuario cancela el
@@ -830,8 +899,16 @@ marker, partir un sector, arrastrar un splitter— y alcanza con que se escape U
 mienta. Comparar el resultado no se puede equivocar.
 
 ⚠ El contenido del archivo se **normaliza** antes de comparar (deserializar a DTO y re-serializar
-con las mismas opciones). Comparar texto crudo sería sensible al FORMATO: un `.mboard` escrito
-compacto se leería como "modificado" sin que nadie lo tocó.
+con las mismas opciones, `BoardStore.ReadSnapshot`). Comparar texto crudo sería sensible al
+FORMATO: un `.mboard` escrito compacto se leería como "modificado" sin que nadie lo tocó.
+
+⚠ **Un archivo VIEJO recién abierto NO puede leerse como modificado**, aunque guardarlo lo
+reescriba en v2. Por eso la normalización convierte el viejo a v2 con **la MISMA función que usa
+la carga** (`ParseFile`: una pestaña con el nombre del archivo, el master mudado a la pestaña) y
+compara v2 contra v2. Si comparara el texto v1 contra la memoria en v2, TODO board de antes
+preguntaría "¿guardar?" al cerrarlo sin tocarlo. La foto de comparar va **sin `ActiveTab`** (ver
+"Un archivo, TODAS las pestañas"). Regresión: `tools/BoardProbe`, casos 8–10, cada check visto
+en rojo rompiendo su código.
 
 `BoardStore` serializa con **DTOs propios**, no con el árbol de dominio: `SectorNode` arrastra un
 MediaPlayer nativo, un BitmapImage y un puntero al padre (un ciclo) — nada de eso puede ni debe
@@ -898,7 +975,9 @@ si dice `Ampz MediaBoard` a secas, eso es el caption de un MessageBox, no la ven
 
 ### ⚠ El título va "board primero, marca al final" (`MainWindow.UpdateTitle`)
 
-`The board — AMB`, no `Ampz MediaBoard — The board`. **No es preferencia estética.**
+`The board — AMB`, no `Ampz MediaBoard — The board`. **No es preferencia estética.** El nombre es
+el del **ARCHIVO**, no el de la pestaña activa (el archivo es el documento; cambiar de pestaña no
+cambia en qué archivo estás). Con cambios sin guardar: `The board • — AMB`.
 
 El botón de la barra de tareas de Windows trunca por la **derecha** y da lugar a un puñado de
 caracteres. Con `Ampz MediaBoard — ` adelante había **18 caracteres antes de que el título dijera
@@ -923,13 +1002,15 @@ está mostrando un error que no leíste.
 | `A` | Fijar el marker de INICIO del loop en el playhead |
 | `B` | Fijar el marker de FIN del loop en el playhead |
 | `L` | Prender/apagar la zona de loop |
-| `Ctrl+T` / `Ctrl+N` | Pestaña NUEVA con un board vacío. `Ctrl+N` ya no pisa el board actual: es el mismo gesto que `Ctrl+T` |
-| `Ctrl+W` | Cerrar la pestaña activa (con el aviso de cambios sin guardar). Click del medio sobre una pestaña, igual |
+| `Ctrl+T` | Agregar una pestaña al archivo (vacía, "Board N"). También el `+` de la tira |
+| `Ctrl+W` | Quitar la pestaña activa del archivo, **sin preguntar** (queda como cambio sin guardar). Click del medio o × sobre una pestaña, igual |
+| doble click en una pestaña | Renombrarla (Enter / click afuera confirma, Esc cancela) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Pestaña siguiente / anterior (da la vuelta) |
 | `Ctrl+1`…`Ctrl+8` | Ir a esa pestaña. **`Ctrl+9` va a la ÚLTIMA**, como en cualquier navegador |
 | Shift+click en el botón de silencio | SOLO: silencia los demás sectores del board y deja sonando este |
-| `Ctrl+O` | Abrir un `.mboard` |
-| `Ctrl+S` | Guardar en el archivo actual (si no hay, pregunta dónde) |
+| `Ctrl+N` | Archivo nuevo, con una sola pestaña vacía (con el aviso de cambios sin guardar) |
+| `Ctrl+O` | Abrir un `.mboard`: reemplaza TODAS las pestañas (con el aviso) |
+| `Ctrl+S` | Guardar todas las pestañas en el archivo actual (si no hay, pregunta dónde) |
 | `Ctrl+Shift+S` | Guardar como… |
 | `Ctrl+V` | Cargar en el sector seleccionado el archivo del portapapeles |
 | doble click | Copiar al portapapeles el path del archivo del sector |
@@ -1044,7 +1125,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path, **cierre rápido** —`test-close.ps1`— y **pestañas** —`test-tabs.ps1`—). `test-multi.ps1` y `test-boardfile.ps1` derivan el exe de `$PSScriptRoot` y generan su GIF de prueba en `%TEMP%` con ffmpeg (hasta 2026-09-30 apuntaban a la carpeta vieja del repo y a un scratchpad borrado: fallaban siempre). ⚠ `test-boardfile.ps1` BORRA la asociación `.mboard` y la vuelve a registrar contra el exe de **Debug**: después de correrlo, repuntala al Release con "Asociar .mboard" o el doble click abre el binario equivocado. ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el **solo** (caso 5), la cuenta y el empuje del **volumen general** (caso 6) y su round-trip en el `.mboard` más el archivo VIEJO sin el campo que tiene que cargar en 100 y NO leerse como modificado (caso 7); el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path, **cierre rápido** —`test-close.ps1`— , **pestañas** —`test-tabs.ps1`— y **audio por sector** —`test-audio.ps1`, suena un tono bajo unos segundos—). `test-multi.ps1` y `test-boardfile.ps1` derivan el exe de `$PSScriptRoot` y generan su GIF de prueba en `%TEMP%` con ffmpeg (hasta 2026-09-30 apuntaban a la carpeta vieja del repo y a un scratchpad borrado: fallaban siempre). ⚠ `test-boardfile.ps1` BORRA la asociación `.mboard` y la vuelve a registrar contra el exe de **Debug**: después de correrlo, repuntala al Release con "Asociar .mboard" o el doble click abre el binario equivocado. ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el **solo** (caso 5), la cuenta y el empuje del **volumen general** (caso 6) y su round-trip en el `.mboard` más el archivo VIEJO sin el campo que tiene que cargar en 100 y NO leerse como modificado (caso 7), el `.mboard` v2 de **varias pestañas** ida y vuelta (caso 8), el archivo viejo que abre como UNA pestaña con el nombre del archivo y SIN cambios (caso 9), y renombrar / agregar / quitar pestañas como cambios mientras la pestaña activa no lo es (caso 10); el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
 | raíz | `App`, `MainWindow`, `DiagLog` (log de diagnóstico, solo con `AMPZ_DIAG_LOG`), `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---

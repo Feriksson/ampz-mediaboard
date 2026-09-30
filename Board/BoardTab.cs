@@ -1,13 +1,12 @@
-using AmpzMediaBoard.Layout;
-using AmpzMediaBoard.Media;
 using AmpzMediaBoard.Persistence;
 using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace AmpzMediaBoard.Board;
 
 /// <summary>
-/// Una PESTAÑA: un board con su vista y su archivo. Es todo el estado por-board que antes vivía
-/// suelto en MainWindow (el ViewModel, la vista, el `.mboard` actual y el título).
+/// Una PESTAÑA: un board con su vista y su nombre. El ARCHIVO no es de la pestaña: un `.mboard`
+/// guarda TODAS las pestañas de la ventana, así que ruta, "¿hay cambios?" y el aviso de descarte
+/// viven en MainWindow, a nivel documento.
 ///
 /// La vista se crea UNA vez y vive lo mismo que la pestaña. No es un detalle: cada BoardView
 /// hostea ventanas nativas de VLC, y recrearla al volver a la pestaña obligaría a re-montar cada
@@ -19,64 +18,50 @@ public sealed partial class BoardTab : ObservableObject, IDisposable
 
     public BoardView View { get; }
 
-    /// <summary>Archivo `.mboard` de la pestaña, o null si el board todavía no se guardó en ninguno.</summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(Header), nameof(ToolTipText), nameof(WindowTitle))]
-    private string? _filePath;
+    /// <summary>Nombre visible en la tira. Se persiste; renombrar es un cambio sin guardar.</summary>
+    [ObservableProperty] private string _name;
 
     [ObservableProperty] private bool _isActive;
 
-    /// <summary>El board difiere de su archivo (o, sin archivo, ya tiene algo adentro). Pinta el "•".</summary>
+    /// <summary>Se está editando el nombre (doble click sobre la pestaña). Cambia etiqueta por caja de texto.</summary>
+    [ObservableProperty] private bool _isRenaming;
+
+    /// <summary>La pestaña difiere de cómo estaba en el archivo (o es nueva). Pinta el "•" de la pestaña.</summary>
     [ObservableProperty] private bool _isModified;
 
     /// <summary>
-    /// El archivo tal como estaba al abrirlo o guardarlo, NORMALIZADO (ver
-    /// <see cref="BoardStore.ReadNormalized"/>). Contra esto se compara la marca "•": la misma
-    /// comparación que el aviso de cambios sin guardar, sin leer el disco en cada refresco.
+    /// Esta pestaña tal como estaba en el archivo al abrirlo o guardarlo, normalizada (ver
+    /// <see cref="BoardStore.ReadSnapshot"/>), o null si nunca se guardó — una pestaña nueva
+    /// ES un cambio sin guardar, así que null cuenta como modificada. Es solo para la marca
+    /// de la pestaña: el aviso de cierre compara el DOCUMENTO entero, que además ve pestañas
+    /// agregadas y quitadas.
     /// </summary>
-    private string? _savedSnapshot;
+    public string? SavedSnapshot { get; set; }
 
-    public BoardTab() => View = new BoardView(Board);
-
-    public string Header => FilePath is null ? "Sin guardar" : Path.GetFileNameWithoutExtension(FilePath);
-
-    public string ToolTipText => FilePath ?? "Board sin guardar en ningún archivo";
-
-    /// <summary>
-    /// Título de la ventana cuando esta pestaña es la activa. Board primero, marca al final: la
-    /// barra de tareas trunca por la derecha (ver "El título va board primero" en el CLAUDE.md).
-    /// </summary>
-    public string WindowTitle => FilePath is null ? "Board sin guardar — AMB" : $"{Header} — AMB";
-
-    /// <summary>
-    /// Board recién nacido: un solo sector, sin nada adentro. Si el usuario partió la pantalla
-    /// o cargó un clip, eso YA es trabajo y merece el aviso.
-    /// </summary>
-    public bool IsEmpty => Board.Root is SectorNode { Kind: MediaKind.None, MissingPath: null };
-
-    /// <summary>Pestaña en blanco: sin archivo y vacía. "Abrir" la reutiliza en vez de abrir otra.</summary>
-    public bool IsBlank => FilePath is null && IsEmpty;
-
-    /// <summary>Pone en la pestaña un board leído de <paramref name="path"/>, con su volumen general.</summary>
-    public void Open(LayoutNode root, string path, int masterVolume = 100)
+    public BoardTab(string name)
     {
-        Board.ReplaceRoot(root);
-        Board.MasterVolume = masterVolume;
-        MarkSaved(path);
+        _name = name;
+        View = new BoardView(Board);
     }
 
-    /// <summary>El board quedó escrito en <paramref name="path"/>: ese pasa a ser su archivo.</summary>
-    public void MarkSaved(string path)
+    /// <summary>
+    /// Nombre por defecto de una pestaña nueva: "Board N" con el MENOR número libre. No "cantidad
+    /// + 1": con Board 1, 2 y 3, cerrar la 2 y abrir otra daría "Board 3" REPETIDO. El menor
+    /// libre nunca repite un nombre por defecto (sí puede repetir uno que el usuario tipeó).
+    /// </summary>
+    public static string NextDefaultName(IEnumerable<string> taken)
     {
-        FilePath = path;
-        _savedSnapshot = BoardStore.ReadNormalized(path);
-        RefreshModified();
+        var used = taken.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var n = 1;
+        while (used.Contains($"Board {n}")) n++;
+        return $"Board {n}";
     }
+
+    /// <summary>La pestaña como se guarda en el archivo.</summary>
+    public TabData ToData() => new(Name, Board.Root, Board.MasterVolume);
 
     public void RefreshModified() =>
-        IsModified = FilePath is null
-            ? !IsEmpty
-            : _savedSnapshot is not null && BoardStore.Serialize(Board.Root, Board.MasterVolume) != _savedSnapshot;
+        IsModified = SavedSnapshot is null || BoardStore.SerializeTab(ToData()) != SavedSnapshot;
 
     /// <summary>Trae la pestaña a primer plano: vista visible y clips reanudados.</summary>
     public void Activate()
