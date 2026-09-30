@@ -333,8 +333,238 @@ public partial class MainWindow : Window
     {
         if (e.ChangedButton != MouseButton.Middle) return;
         e.Handled = true;
+        // En medio de un arrastre no se cierra nada: la pestaña arrastrada podría ser esa.
+        if (_tabDrag is { Active: true }) return;
         if ((sender as FrameworkElement)?.DataContext is BoardTab tab && _tabs.Contains(tab)) CloseTab(tab);
     }
+
+    #endregion
+
+    #region Reordenar pestañas (arrastre y Ctrl+Shift+RePág/AvPág)
+
+    /// <summary>
+    /// Mueve una pestaña de lugar en la tira. Es LA operación de reordenar: la usan el arrastre y
+    /// el teclado, y la regla vive en <see cref="TabOrder.Move"/> (probada en BoardProbe).
+    ///
+    /// ⚠ Barato a propósito: cambia el orden de <see cref="_tabs"/> y nada más. Ni una BoardView
+    /// se mueve en BoardHost, ni un sector se entera, ni VLC abre nada — ningún clip parpadea.
+    /// La pestaña activa sigue siendo el MISMO objeto (<see cref="_active"/> es una referencia,
+    /// no un índice), así que "cuál está activa" sobrevive al movimiento sin hacer nada; al
+    /// guardar, ActiveTab sale de IndexOf y apunta a la misma pestaña en su lugar nuevo.
+    ///
+    /// Es un cambio sin guardar: el orden del array Tabs del archivo ES el orden de la tira. No
+    /// hace falta marcarlo a mano: la "•" sale de COMPARAR contra el archivo, así que volver al
+    /// orden original la apaga sola.
+    /// </summary>
+    private bool MoveTab(int from, int to)
+    {
+        if (!TabOrder.Move(_tabs, from, to)) return false;
+        DiagLog.Write($"move {from} {to}");
+        RefreshModified();
+        return true;
+    }
+
+    /// <summary>Ctrl+Shift+RePág / AvPág: la pestaña activa un lugar a la izquierda / derecha, sin dar la vuelta.</summary>
+    private void MoveActiveTab(int step)
+    {
+        var tab = _active!;
+        var i = _tabs.IndexOf(tab);
+        if (!MoveTab(i, i + step)) return;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+            (TabList.ItemContainerGenerator.ContainerFromItem(tab) as FrameworkElement)?.BringIntoView());
+    }
+
+    /// <summary>
+    /// Un arrastre de pestaña, desde que se aprieta hasta que se suelta. Dos fases: ARMADO (botón
+    /// apretado, todavía por debajo del umbral: un click normal) y ACTIVO (superó el umbral: la
+    /// lista tiene el mouse y la pestaña sigue al cursor).
+    /// </summary>
+    private sealed class TabDrag(BoardTab tab, int originalIndex, double pressX, double grabOffset)
+    {
+        public BoardTab Tab { get; } = tab;
+
+        /// <summary>Dónde estaba al empezar. Esc y la pérdida de captura la devuelven acá.</summary>
+        public int OriginalIndex { get; } = originalIndex;
+
+        public double PressX { get; } = pressX;
+
+        /// <summary>A cuántos px del borde izquierdo de la pestaña se agarró: la pestaña sigue al mouse sin "saltar".</summary>
+        public double GrabOffset { get; } = grabOffset;
+
+        public bool Active { get; set; }
+    }
+
+    private TabDrag? _tabDrag;
+
+    /// <summary>
+    /// Mouse Capture + MouseMove, NO DragDrop.DoDragDrop. El arrastre nunca sale de la ventana, y
+    /// el DataObject de WPF envuelve lo que le metas en COM para cruzar procesos: es la
+    /// herramienta equivocada para un objeto vivo (mismo motivo que SectorView._dragSource).
+    /// Además DoDragDrop es bloqueante y no da el seguimiento píxel a píxel que hace falta para
+    /// que la pestaña siga al cursor.
+    ///
+    /// Acá solo se ARMA. No se captura nada ni se marca Handled: si el mouse no se mueve más
+    /// que el umbral, esto es un click y tiene que seguir siéndolo (activar, doble click para
+    /// renombrar).
+    /// </summary>
+    private void OnTabPreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        _tabDrag = null;
+
+        // El segundo click de un doble click es RENOMBRAR, nunca un arrastre.
+        if (e.ClickCount != 1) return;
+
+        // El × y la caja de renombrar no son asas: apretar el × es cerrar, y en la caja el mouse
+        // selecciona texto. Mismo chequeo que OnTabDoubleClick para el ×.
+        if (e.OriginalSource is DependencyObject source &&
+            (FindAncestor<TextBox>(source) is not null ||
+             (FindAncestor<Button>(source) is { } button && !ReferenceEquals(button, sender)))) return;
+
+        if ((sender as FrameworkElement)?.DataContext is not BoardTab { IsRenaming: false } tab || !_tabs.Contains(tab)) return;
+        if (TabList.ItemContainerGenerator.ContainerFromItem(tab) is not FrameworkElement container) return;
+
+        _tabDrag = new TabDrag(tab, _tabs.IndexOf(tab), e.GetPosition(TabList).X, e.GetPosition(container).X);
+    }
+
+    private void OnTabListPreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (_tabDrag is not { } drag) return;
+
+        if (!drag.Active)
+        {
+            // Se soltó sin que nos enteráramos (el botón se soltó fuera de la ventana, por ej.).
+            if (e.LeftButton != MouseButtonState.Pressed) { _tabDrag = null; return; }
+
+            // Solo el eje X: la tira es horizontal, y un temblor vertical no es intención de mover.
+            if (Math.Abs(e.GetPosition(TabList).X - drag.PressX) < SystemParameters.MinimumHorizontalDragDistance) return;
+
+            // La lista le roba la captura al botón de la pestaña: el botón deja de estar
+            // "apretado" y al soltar NO dispara Click. Ver el XAML sobre por qué la lista y no
+            // la pestaña.
+            // ⚠ Active ANTES de capturar: CaptureMouse levanta un MouseMove sintético DENTRO de
+            // la llamada, que reentra en este handler. Con Active todavía en false, el arrastre
+            // "arrancaba" dos veces (visto en el DiagLog: dos líneas `tabdrag start`).
+            drag.Active = true;
+            if (!TabList.CaptureMouse()) { _tabDrag = null; return; }
+
+            // Decisión: la arrastrada pasa a ser la ACTIVA al empezar (como Chrome), no al
+            // soltar. Mientras la movés estás mirando SU board, que es lo que estás acomodando; y
+            // el cambio de pestaña es instantáneo (nada se reconstruye), así que no hay costo en
+            // hacerlo ya. Activarla al soltar dejaría una pestaña "en la mano" que no es la que
+            // se ve debajo, y el que suelta en el mismo lugar esperaría haberla seleccionado igual.
+            SwitchTo(drag.Tab);
+            DiagLog.Write($"tabdrag start {drag.OriginalIndex}");
+        }
+
+        FollowPointer(drag, e.GetPosition(TabList).X);
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// La pestaña arrastrada sigue al cursor (TranslateTransform, sin tocar el layout) y las
+    /// demás se corren a medida que las cruza: se REORDENA EN VIVO, como en un navegador. Se
+    /// eligió eso y no un indicador de inserción porque lo que ves durante el arrastre es
+    /// exactamente lo que queda al soltar — no hay que imaginar dónde cae.
+    /// </summary>
+    private void FollowPointer(TabDrag drag, double pointerX)
+    {
+        var index = _tabs.IndexOf(drag.Tab);
+        if (index < 0 || Container(drag.Tab) is not { } container) return;
+
+        // Dónde QUIERE estar la pestaña: bajo el cursor, conservando el punto de agarre.
+        var width = container.ActualWidth;
+        var wanted = pointerX - drag.GrabOffset;
+
+        // ⚠ El orden se decide con la posición SIN recortar, y solo el DIBUJO se recorta a la
+        // tira. La tira mide exactamente lo que sus pestañas (no se estira), así que recortada
+        // la pestaña nunca llegaba a cruzar la mitad de la última: se vio en la prueba, el
+        // arrastre hasta el final se quedaba en el anteúltimo lugar. Sin recortar, llevar el
+        // mouse más allá del borde la manda al extremo, como en un navegador.
+        var target = TabOrder.DropIndex(Slots(), index, wanted + width / 2);
+        var left = Math.Clamp(wanted, 0, Math.Max(0, TabList.ActualWidth - width));
+        if (target != index)
+        {
+            MoveTab(index, target);
+            // Layout YA, y solo es la tira: sin esto la pestaña se dibujaría un cuadro con la
+            // posición vieja de su lugar y se vería un salto. BoardHost no queda invalidado por
+            // un Move de la tira, así que esta pasada no toca ninguna BoardView.
+            TabList.UpdateLayout();
+            container = Container(drag.Tab) ?? container;
+        }
+
+        // El contenedor puede ser otro después del Move (el panel es libre de regenerarlo):
+        // se le pone el transform al que hay AHORA y se sube por encima de sus vecinas.
+        Panel.SetZIndex(container, 1);
+        if (container.RenderTransform is not System.Windows.Media.TranslateTransform shift)
+            container.RenderTransform = shift = new System.Windows.Media.TranslateTransform();
+        shift.X = left - SlotLeft(container);
+    }
+
+    private void OnTabListPreviewMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_tabDrag is not { } drag) return;
+        if (!drag.Active)
+        {
+            // Nunca superó el umbral: era un click, y el Click del botón lo atiende.
+            _tabDrag = null;
+            return;
+        }
+
+        e.Handled = true;
+        EndTabDrag(commit: true);
+    }
+
+    /// <summary>
+    /// La lista perdió el mouse sin que lo soltáramos nosotros: Alt+Tab, un diálogo, otra app
+    /// que lo tomó. Se CANCELA (vuelve al orden original): no sabemos dónde quería soltar.
+    /// ⚠ LostMouseCapture BURBUJEA: también llega el del botón de la pestaña cuando la lista
+    /// le roba la captura al empezar. Solo cuenta el de la lista misma.
+    /// </summary>
+    private void OnTabListLostMouseCapture(object sender, MouseEventArgs e)
+    {
+        if (!ReferenceEquals(e.OriginalSource, TabList)) return;
+        if (_tabDrag is { Active: true }) EndTabDrag(commit: false);
+    }
+
+    /// <summary>
+    /// Termina el arrastre. El orden ya se aplicó EN VIVO: soltar no mueve nada, y cancelar
+    /// devuelve la pestaña a su lugar original. Soltar en el mismo lugar deja la colección
+    /// igual que antes → la comparación contra el archivo da igual → no hay "•".
+    /// </summary>
+    private void EndTabDrag(bool commit)
+    {
+        if (_tabDrag is not { Active: true } drag) { _tabDrag = null; return; }
+
+        // PRIMERO se suelta el estado: la liberación de la captura de más abajo dispara
+        // LostMouseCapture, que así encuentra el arrastre ya terminado y no lo "cancela".
+        _tabDrag = null;
+
+        if (!commit) MoveTab(_tabs.IndexOf(drag.Tab), drag.OriginalIndex);
+
+        foreach (var tab in _tabs)
+        {
+            if (Container(tab) is not { } container) continue;
+            Panel.SetZIndex(container, 0);
+            container.ClearValue(RenderTransformProperty);
+        }
+
+        if (ReferenceEquals(Mouse.Captured, TabList)) TabList.ReleaseMouseCapture();
+        RefreshModified();
+        DiagLog.Write($"tabdrag {(commit ? "drop" : "cancel")} {drag.OriginalIndex} {_tabs.IndexOf(drag.Tab)}");
+    }
+
+    private FrameworkElement? Container(BoardTab tab) =>
+        TabList.ItemContainerGenerator.ContainerFromItem(tab) as FrameworkElement;
+
+    /// <summary>
+    /// Izquierda del LUGAR de una pestaña en la tira, sin el transform del arrastre (GetOffset
+    /// no lo incluye; TranslatePoint sí, y devolvería dónde está dibujada, no su lugar).
+    /// </summary>
+    private static double SlotLeft(FrameworkElement container) =>
+        System.Windows.Media.VisualTreeHelper.GetOffset(container).X;
+
+    private List<(double Left, double Width)> Slots() =>
+        _tabs.Select(t => Container(t) is { } c ? (SlotLeft(c), c.ActualWidth) : (0d, 0d)).ToList();
 
     #endregion
 
@@ -788,6 +1018,16 @@ public partial class MainWindow : Window
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
+        // Arrastrando una pestaña: Esc cancela (vuelve al orden original) y NINGÚN otro atajo
+        // corre. Un Ctrl+W o un Ctrl+O a mitad del arrastre cambiaría la colección que se está
+        // reordenando por debajo del mouse.
+        if (_tabDrag is { Active: true })
+        {
+            if (e.Key == Key.Escape) EndTabDrag(commit: false);
+            e.Handled = true;
+            return;
+        }
+
         // Escribiendo el nombre de una pestaña, las teclas son TEXTO: sin esto, tipear una "A"
         // movería el marker de loop y el Espacio daría play en vez de escribir un espacio.
         if (Keyboard.FocusedElement is TextBox) return;
@@ -826,6 +1066,16 @@ public partial class MainWindow : Window
                     return;
                 case Key.Tab:
                     CycleTab(shift ? -1 : 1);
+                    e.Handled = true;
+                    return;
+                // Mover la pestaña activa, como en los navegadores y VS Code. Además del
+                // arrastre: es el camino exacto (y el que usan las pruebas).
+                case Key.PageUp when shift:
+                    MoveActiveTab(-1);
+                    e.Handled = true;
+                    return;
+                case Key.PageDown when shift:
+                    MoveActiveTab(1);
                     e.Handled = true;
                     return;
                 case >= Key.D1 and <= Key.D9:

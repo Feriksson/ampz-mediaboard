@@ -547,6 +547,7 @@ las pestañas:
 |---|---|
 | `Ctrl+T` / `+` | Agrega una pestaña **al archivo**, nombre "Board N" con el **menor N libre** (`BoardTab.NextDefaultName`; "cantidad + 1" repetiría nombres al cerrar una del medio). Es un cambio sin guardar. |
 | `Ctrl+W` / × / click del medio | **Quita** la pestaña **sin preguntar**: queda como cambio sin guardar, y "No guardar" la devuelve. Quitar la última deja una vacía. Sus players se sueltan por el camino que no bloquea. |
+| arrastrar la pestaña / `Ctrl+Shift+RePág`/`AvPág` | **Reordena**. Cambio sin guardar (el orden del array `Tabs` ES el de la tira); volver al orden original lo apaga solo. Ver "Reordenar pestañas", abajo. |
 | doble click en la pestaña | Renombrar en línea. Enter o click afuera confirma, Esc cancela, vacío revierte. Es un cambio sin guardar (el nombre se persiste). |
 | `Ctrl+S` / `Ctrl+Shift+S` | Guarda TODAS las pestañas en UN archivo, siempre en formato v2. |
 | `Ctrl+O` | **Reemplaza el documento entero** (con el aviso del actual) y libera todas las pestañas. |
@@ -558,6 +559,40 @@ en la prueba): en WPF, un click sobre algo NO enfocable —casi todo el board—
 teclado, y la caja quedaba abierta con el texto sin confirmar. Lo resuelve el `PreviewMouseDown`
 de la ventana (`OnWindowPreviewMouseDown`) y el `Deactivated`. Mientras se escribe, los atajos se
 saltean (`Keyboard.FocusedElement is TextBox`): si no, una "A" movería el marker de loop.
+
+#### Reordenar pestañas (arrastre en vivo, `Board/TabOrder.cs`)
+
+La regla vive en `TabOrder` (pura, probada en `BoardProbe` caso 11) y la única operación es
+`MainWindow.MoveTab`: mueve la **colección** `_tabs` y NADA más. ⚠ Ni una `BoardView` se mueve en
+`BoardHost` (su orden ahí es irrelevante: se cambia por visibilidad), así que ningún clip se
+re-monta ni parpadea. La activa es una REFERENCIA (`_active`), no un índice: sobrevive al
+movimiento sola, y `ActiveTab` sale de `IndexOf` al guardar.
+
+- **Captura de mouse + MouseMove, NO `DoDragDrop`** (mismo motivo que `SectorView._dragSource`:
+  el DataObject es para cruzar procesos). Se arma en el `PreviewMouseLeftButtonDown` de la
+  pestaña y arranca recién al superar `MinimumHorizontalDragDistance`: debajo, es un click.
+  El × , la caja de renombrar y el 2º click de un doble click nunca arman.
+- ⚠ **Captura la LISTA (`TabList`), no la pestaña**: el `Move` reacomoda los contenedores del
+  panel, y un elemento que sale del árbol visual pierde la captura → el arrastre se cancelaba
+  solo en el primer cruce.
+- **Feedback: se reordena EN VIVO** (la pestaña sigue al cursor con un `TranslateTransform`, las
+  demás se corren al cruzar la MITAD de la vecina — sin rebote entre anchos distintos). La
+  arrastrada pasa a ser la ACTIVA al empezar, como en Chrome: estás mirando lo que movés.
+- ⚠ El orden se decide con la posición **sin recortar** a la tira; solo el dibujo se recorta. La
+  tira mide lo que sus pestañas, y recortada la pestaña nunca cruzaba la mitad de la última.
+- ⚠ `Active = true` ANTES de `CaptureMouse`: la captura levanta un MouseMove sintético que
+  reentra en el handler (el arrastre "arrancaba" dos veces).
+- `Esc` cancela (vuelve al orden original) y **ningún otro atajo corre** durante el arrastre;
+  perder la captura (Alt+Tab, un diálogo) también cancela. `LostMouseCapture` BURBUJEA: solo
+  cuenta el de la lista (el del botón llega al robarle la captura al empezar).
+
+Regresión: `tools/test-tab-reorder.ps1` — arrastre REAL (SendInput), `Esc`, soltar en el lugar,
+`Ctrl+Shift+RePág/AvPág`; orden leído por UIA. Visto en rojo con `MoveTab` reconstruyendo las
+vistas (21 `open` nuevos) y re-parentándolas en `BoardHost` (`viewreparent`). ⚠ Re-parentar NO
+se ve de otra forma: no reabre archivos, el video lo sobrevive, y un Remove + Insert en la misma
+vuelta ni siquiera dispara `Unloaded` — por eso el aviso sale de `BoardView.OnVisualParentChanged`.
+⚠ Necesita el escritorio QUIETO (espera 3 s sin entrada del usuario; si no, sale **2**): con
+alguien moviendo el mouse, el arrastre sintético mide la pelea entre los dos.
 
 **La pestaña activa se persiste** (`ActiveTab`) y se restaura al abrir, pero **NO cuenta como
 cambio sin guardar**: cambiar de pestaña es mirar, no editar. Si contara, cada `Ctrl+Tab` haría
@@ -575,7 +610,8 @@ y un negro de 200 ms se le escapa a cualquier muestreo de pantalla. Adentro se e
 <ms>` (cambio de pestaña), `open <path>` (cada `Media` creado, para contar re-aperturas), `audio
 …` (volumen pedido vs. el que VLC dice tener justo después de pedirlo) y `audiostate …` (el mismo
 readback SIN escribir antes, cada ~2 s: es el que prueba que cada player tiene su volumen, ver
-"La salida de audio es DirectSound").
+"La salida de audio es DirectSound"), `move <de> <a>` / `tabdrag start|drop|cancel …` (reordenar
+pestañas) y `viewreparent <padre>` (una `BoardView` salió de un padre visual).
 
 Regresión: `tools/test-tabs.ps1` (UI Automation + `DiagLog`). Abre UN `.mboard` v2 de tres
 pestañas (generado con `ConvertTo-Json`). Verifica el título del archivo sin "•" al abrir y
@@ -1006,6 +1042,7 @@ está mostrando un error que no leíste.
 | `Ctrl+W` | Quitar la pestaña activa del archivo, **sin preguntar** (queda como cambio sin guardar). Click del medio o × sobre una pestaña, igual |
 | doble click en una pestaña | Renombrarla (Enter / click afuera confirma, Esc cancela) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Pestaña siguiente / anterior (da la vuelta) |
+| `Ctrl+Shift+RePág` / `Ctrl+Shift+AvPág` | Mover la pestaña activa un lugar a la izquierda / derecha (sin dar la vuelta). También se arrastran con el mouse |
 | `Ctrl+1`…`Ctrl+8` | Ir a esa pestaña. **`Ctrl+9` va a la ÚLTIMA**, como en cualquier navegador |
 | Shift+click en el botón de silencio | SOLO: silencia los demás sectores del board y deja sonando este |
 | `Ctrl+N` | Archivo nuevo, con una sola pestaña vacía (con el aviso de cambios sin guardar) |
@@ -1125,7 +1162,7 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 | `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path, **cierre rápido** —`test-close.ps1`— , **pestañas** —`test-tabs.ps1`— y **audio por sector** —`test-audio.ps1`, suena un tono bajo unos segundos—). `test-multi.ps1` y `test-boardfile.ps1` derivan el exe de `$PSScriptRoot` y generan su GIF de prueba en `%TEMP%` con ffmpeg (hasta 2026-09-30 apuntaban a la carpeta vieja del repo y a un scratchpad borrado: fallaban siempre). ⚠ `test-boardfile.ps1` BORRA la asociación `.mboard` y la vuelve a registrar contra el exe de **Debug**: después de correrlo, repuntala al Release con "Asociar .mboard" o el doble click abre el binario equivocado. ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el **solo** (caso 5), la cuenta y el empuje del **volumen general** (caso 6) y su round-trip en el `.mboard` más el archivo VIEJO sin el campo que tiene que cargar en 100 y NO leerse como modificado (caso 7), el `.mboard` v2 de **varias pestañas** ida y vuelta (caso 8), el archivo viejo que abre como UNA pestaña con el nombre del archivo y SIN cambios (caso 9), y renombrar / agregar / quitar pestañas como cambios mientras la pestaña activa no lo es (caso 10); el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path, **cierre rápido** —`test-close.ps1`— , **pestañas** —`test-tabs.ps1`—, **reordenar pestañas** —`test-tab-reorder.ps1`, mouse real, sale **2** si el escritorio está en uso— y **audio por sector** —`test-audio.ps1`, suena un tono bajo unos segundos—). `test-multi.ps1` y `test-boardfile.ps1` derivan el exe de `$PSScriptRoot` y generan su GIF de prueba en `%TEMP%` con ffmpeg (hasta 2026-09-30 apuntaban a la carpeta vieja del repo y a un scratchpad borrado: fallaban siempre). ⚠ `test-boardfile.ps1` BORRA la asociación `.mboard` y la vuelve a registrar contra el exe de **Debug**: después de correrlo, repuntala al Release con "Asociar .mboard" o el doble click abre el binario equivocado. ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el **solo** (caso 5), la cuenta y el empuje del **volumen general** (caso 6) y su round-trip en el `.mboard` más el archivo VIEJO sin el campo que tiene que cargar en 100 y NO leerse como modificado (caso 7), el `.mboard` v2 de **varias pestañas** ida y vuelta (caso 8), el archivo viejo que abre como UNA pestaña con el nombre del archivo y SIN cambios (caso 9), renombrar / agregar / quitar pestañas como cambios mientras la pestaña activa no lo es (caso 10), y reordenarlas: orden persistido, misma activa, cambio que se deshace al volver, y la regla del arrastre sin rebote (caso 11); el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
 | raíz | `App`, `MainWindow`, `DiagLog` (log de diagnóstico, solo con `AMPZ_DIAG_LOG`), `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---

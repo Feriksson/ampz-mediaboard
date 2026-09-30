@@ -103,7 +103,14 @@
                      defecto mide 17px de alto y es clara, más grande que la tira misma. -->
                 <ScrollViewer x:Name="TabScroller" HorizontalScrollBarVisibility="Hidden"
                               VerticalScrollBarVisibility="Disabled" HorizontalAlignment="Left">
-                    <ItemsControl x:Name="TabList">
+                    <!-- Reordenar arrastrando: el MOUSE lo captura la lista, no la pestaña. Mover la
+                         pestaña en la colección reacomoda los contenedores del panel, y un
+                         elemento que sale del árbol visual pierde la captura: capturando en la
+                         pestaña, el arrastre se cancelaría solo en el primer intercambio. -->
+                    <ItemsControl x:Name="TabList"
+                                  PreviewMouseMove="OnTabListPreviewMouseMove"
+                                  PreviewMouseLeftButtonUp="OnTabListPreviewMouseUp"
+                                  LostMouseCapture="OnTabListLostMouseCapture">
                         <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
                                 <StackPanel Orientation="Horizontal" />
@@ -114,9 +121,13 @@
                                 <!-- Focusable=False: como en un navegador, clickear una pestaña
                                      no se roba el foco — si no, el Espacio siguiente "apretaría"
                                      la pestaña en vez de dar play. -->
+                                <!-- PreviewMouseLeftButtonDown ARMA el arrastre para reordenar (no
+                                     lo arranca: eso pasa recién al superar el umbral, ver
+                                     MainWindow.OnTabPreviewMouseDown). -->
                                 <Button Click="OnTabClick" MouseUp="OnTabMouseUp" Focusable="False"
                                         MouseDoubleClick="OnTabDoubleClick"
-                                        Cursor="Hand" ToolTip="Doble click para renombrar"
+                                        PreviewMouseLeftButtonDown="OnTabPreviewMouseDown"
+                                        Cursor="Hand" ToolTip="Doble click para renombrar · arrastrar para reordenar (Ctrl+Shift+RePág / AvPág)"
                                         AutomationProperties.AutomationId="BoardTab"
                                         AutomationProperties.Name="{Binding Name}">
                                     <Button.Template>

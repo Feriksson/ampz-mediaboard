@@ -1,5 +1,6 @@
 // OJO: los ImplicitUsings de un proyecto WPF NO incluyen System.IO (a diferencia de una consola).
 // Sin este using, Path y File no resuelven. Mismo gotcha que documenta el CLAUDE.md del repo.
+using System.Collections.ObjectModel;
 using System.IO;
 using AmpzMediaBoard.Board;
 using AmpzMediaBoard.Layout;
@@ -26,6 +27,7 @@ internal static class Program
         VariasPestanasEnUnArchivo();
         ArchivoViejoEsUnaPestanaSinCambios();
         RenombrarAgregarYQuitarSonCambios();
+        ReordenarPestanasEsUnCambioQueSeDeshace();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -346,6 +348,70 @@ internal static class Program
         Check("nombre por defecto en un archivo vacio", BoardTab.NextDefaultName([]) == "Board 1");
 
         File.Delete(archivo);
+    }
+
+    /// <summary>
+    /// Reordenar pestanas (arrastre o Ctrl+Shift+RePag/AvPag, ambos terminan en TabOrder.Move):
+    ///  - el orden del array Tabs del archivo ES el orden de la tira;
+    ///  - la activa es la MISMA pestana despues del movimiento (se guarda por IndexOf de la
+    ///    referencia, no por el indice viejo);
+    ///  - mover es un cambio sin guardar, y volver al orden original ya NO lo es;
+    ///  - DropIndex (la regla del arrastre) no rebota entre una pestana ancha y una angosta.
+    /// </summary>
+    private static void ReordenarPestanasEsUnCambioQueSeDeshace()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 11. REORDENAR PESTANAS: ORDEN, ACTIVA Y CAMBIOS ===");
+
+        var uno = new TabData("Uno", SectorCon(@"D:\clips\uno.mp4", 0, 100, 50, false));
+        var dos = new TabData("Dos", SectorCon(@"D:\clips\dos.mp4", 0, 100, 60, false));
+        var tres = new TabData("Tres", new SectorNode());
+        var tabs = new ObservableCollection<TabData> { uno, dos, tres };
+        var activa = uno;
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-orden.mboard");
+        BoardStore.SaveTo(archivo, tabs, tabs.IndexOf(activa));
+        Check("recien guardado, coincide", BoardStore.MatchesFile(archivo, tabs));
+
+        Check("mover a su mismo lugar no hace nada", !TabOrder.Move(tabs, 1, 1) && tabs.SequenceEqual([uno, dos, tres]));
+        Check("mover fuera de rango no hace nada", !TabOrder.Move(tabs, 5, 0) && tabs.SequenceEqual([uno, dos, tres]));
+
+        Check("mover la primera al final", TabOrder.Move(tabs, 0, 2));
+        Check("el orden nuevo es Dos, Tres, Uno", tabs.Select(t => t.Name).SequenceEqual(["Dos", "Tres", "Uno"]));
+        Check("mover ES un cambio sin guardar", !BoardStore.MatchesFile(archivo, tabs));
+
+        var movido = Path.Combine(Path.GetTempPath(), "probe-orden-movido.mboard");
+        BoardStore.SaveTo(movido, tabs, tabs.IndexOf(activa));
+        var leido = BoardStore.LoadFrom(movido);
+        Check("el archivo guarda el orden nuevo",
+            leido is not null && leido.Tabs.Select(t => t.Name).SequenceEqual(["Dos", "Tres", "Uno"]));
+        Check("y ActiveTab sigue apuntando a la MISMA pestana (Uno)",
+            leido is not null && leido.Tabs[leido.ActiveTab].Name == "Uno");
+
+        Check("volver al orden original", TabOrder.Move(tabs, 2, 0) && tabs.SequenceEqual([uno, dos, tres]));
+        Check("de vuelta en su lugar YA NO es un cambio", BoardStore.MatchesFile(archivo, tabs));
+
+        // Una ancha (200) al lado de una angosta (50): cruza al pasar la MITAD de la vecina, y
+        // despues del intercambio el mismo centro NO la devuelve.
+        List<(double, double)> antes = [(0, 200), (200, 50), (250, 100)];
+        Check("sin cruzar la mitad de la vecina, se queda", TabOrder.DropIndex(antes, 0, 220) == 0);
+        Check("al cruzar la mitad de la vecina, pasa", TabOrder.DropIndex(antes, 0, 226) == 1);
+        List<(double, double)> despues = [(0, 50), (50, 200), (250, 100)];
+        Check("despues del intercambio, el mismo centro NO rebota", TabOrder.DropIndex(despues, 1, 226) == 1);
+
+        // El rebote de verdad: una ANGOSTA arrastrada hacia una ancha. Con una frontera fija (el
+        // borde de la vecina) pasa al tocarla y, ya intercambiada, el mismo centro la devuelve:
+        // oscila a cada pixel. Se mira el par entero: donde cae, y que desde ahi no se mueva.
+        List<(double, double)> angostaPrimero = [(0, 50), (50, 200)];
+        List<(double, double)> anchaPrimero = [(0, 200), (200, 50)];
+        var cae = TabOrder.DropIndex(angostaPrimero, 0, 80);
+        Check("angosta junto a ancha: desde donde cae, no rebota",
+            TabOrder.DropIndex(cae == 0 ? angostaPrimero : anchaPrimero, cae, 80) == cae);
+        Check("un tiron largo cruza varias de una", TabOrder.DropIndex(antes, 0, 330) == 2);
+        Check("hacia la izquierda tambien", TabOrder.DropIndex(antes, 2, 20) == 0);
+
+        File.Delete(archivo);
+        File.Delete(movido);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

@@ -35,6 +35,23 @@ public sealed class BoardView : ContentControl
     }
 
     /// <summary>
+    /// Deja rastro (DiagLog) cada vez que la vista SALE de un padre visual: re-parentarla o
+    /// sacarla de BoardHost. Reordenar pestañas no puede hacerlo nunca, y desde afuera no se nota
+    /// — ni reabre archivos ni apaga el video — así que sin este aviso la prueba no lo ve. Ver
+    /// tools/test-tab-reorder.ps1.
+    ///
+    /// ⚠ Por qué acá y no en Unloaded: se midió que un Remove + Insert en la misma vuelta del
+    /// Dispatcher NO dispara Unloaded (WPF lo posterga y lo anula al volver a cargarse), y la
+    /// mutación "re-parentar al reordenar" pasaba en verde. Este override corre sincrónico en
+    /// cada cambio de padre. Colapsar la vista (cambiar de pestaña) no cambia el padre.
+    /// </summary>
+    protected override void OnVisualParentChanged(DependencyObject oldParent)
+    {
+        base.OnVisualParentChanged(oldParent);
+        if (oldParent is not null) DiagLog.Write($"viewreparent {oldParent.GetType().Name}");
+    }
+
+    /// <summary>
     /// Reconstruye el árbol visual COMPLETO. Es un martillo, sí, pero solo se dispara cuando el
     /// usuario parte o cierra un sector — acciones deliberadas y poco frecuentes. Reconstruir
     /// únicamente el subárbol afectado sería más eficiente y bastante más código; no vale el
