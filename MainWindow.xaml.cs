@@ -1314,6 +1314,13 @@ public partial class MainWindow : Window
                 sector.LoopEnabled = !sector.LoopEnabled;
                 e.Handled = true;
                 break;
+
+            // P = el ⇄ del sector: loop ida y vuelta. Mismo camino que el botón
+            // (SectorNode.TogglePingPong), así que rechaza igual (zona > 30 s, sin ffmpeg).
+            case Key.P when sector.Kind == AmpzMediaBoard.Media.MediaKind.Video:
+                sector.TogglePingPong();
+                e.Handled = true;
+                break;
         }
     }
 }

@@ -21,6 +21,13 @@
 #expr GetVersionComponents(PublishDir + "\" + AppExe, VerMajor, VerMinor, VerRev, VerBuild)
 #define AppVersion Str(VerMajor) + "." + Str(VerMinor) + "." + Str(VerRev)
 
+; ffmpeg (loop ida y vuelta) viaja en {app}\ffmpeg\ junto con su LICENSE y su NOTICE: los copia el
+; .csproj al publish y el [Files] de abajo los empaqueta con el resto. Si falta, NO se compila un
+; instalador sin la feature: build-installer.ps1 corre tools/fetch-ffmpeg.ps1 antes de publicar.
+#if !FileExists(PublishDir + "\ffmpeg\ffmpeg.exe") || !FileExists(PublishDir + "\ffmpeg\LICENSE.txt")
+  #error Falta ffmpeg (o su licencia) en el publish. Corre tools/fetch-ffmpeg.ps1 y volve a publicar.
+#endif
+
 [Setup]
 ; El AppId es la identidad del producto para Windows: NUNCA lo cambies. Cambiarlo hace que
 ; una version nueva se instale AL LADO de la vieja en vez de actualizarla.
@@ -58,6 +65,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; Al actualizar, la carpeta de VLC se reemplaza ENTERA: un plugin que la version nueva ya no
 ; trae (o que se podo para achicar el publish) no puede quedar huerfano de la version vieja.
 Type: filesandordirs; Name: "{app}\libvlc"
+; Mismo criterio para ffmpeg: la version nueva reemplaza la carpeta entera.
+Type: filesandordirs; Name: "{app}\ffmpeg"
 
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion

@@ -238,6 +238,55 @@
                                   Style="{DynamicResource LoopToggle}"
                                   ToolTip="Reproducir solo dentro de la zona marcada" />
 
+                    <!-- ══ Loop ida y vuelta (ping-pong) ══
+                         Va pegado al LOOP porque es un modo de la zona de loop: A→B y B→A.
+                         ⚠ Es un Button y NO un ToggleButton bindeado: prenderlo puede RECHAZARSE
+                         (zona > 30 s, sin ffmpeg), y un ToggleButton se da vuelta solo al click;
+                         con TwoWay tendría que pelearse con el modelo que lo vuelve a apagar, y
+                         con OneWay el click local MATA el binding (la trampa de la DP OneWay del
+                         CLAUDE.md). El botón solo PIDE (SectorNode.TogglePingPong) y el "apretado"
+                         lo pinta el modelo vía DataTrigger.
+                         ⚠ U+21C4 VERIFICADO con GlyphTypeface: existe en "Segoe UI Symbol" y NO
+                         en "Segoe UI" (saldría TOFU, el error que ya se pagó con la carpeta). -->
+                    <Button x:Name="PingPongButton" Content="&#x21C4;" FontFamily="Segoe UI Symbol"
+                            Margin="4,0,0,0" Width="28"
+                            AutomationProperties.AutomationId="PingPongButton"
+                            AutomationProperties.Name="Loop ida y vuelta"
+                            ToolTipService.ShowOnDisabled="True"
+                            ToolTip="Loop ida y vuelta (sin sonido) · P">
+                        <Button.Style>
+                            <Style TargetType="Button">
+                                <Setter Property="Height" Value="24" />
+                                <Setter Property="FontSize" Value="13" />
+                                <Setter Property="Foreground" Value="{DynamicResource DimTextBrush}" />
+                                <Setter Property="Cursor" Value="Hand" />
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border x:Name="Bg" Background="#2E2E3A" CornerRadius="4">
+                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <!-- "Apretado" = el PEDIDO, con el mismo acento que LOOP:
+                                                     es el mismo control de la misma zona. -->
+                                                <DataTrigger Binding="{Binding PingPong}" Value="True">
+                                                    <Setter TargetName="Bg" Property="Background" Value="{DynamicResource AccentBrush}" />
+                                                    <Setter Property="Foreground" Value="#0E1620" />
+                                                </DataTrigger>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="Bg" Property="Opacity" Value="0.85" />
+                                                </Trigger>
+                                                <Trigger Property="IsEnabled" Value="False">
+                                                    <Setter Property="Opacity" Value="0.35" />
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+
                     <!-- ══ Audio del sector ══
                          El mute va SEPARADO del volumen (y no es "volumen a 0") para que
                          silenciar y volver no te haga perder el nivel que ajustaste. En un board
@@ -256,6 +305,15 @@
                     <TextBlock x:Name="TimeLabel" VerticalAlignment="Center" Margin="10,0,0,0"
                                FontFamily="Consolas" FontSize="11"
                                Foreground="{DynamicResource DimTextBrush}" />
+
+                    <!-- Estado del ping-pong: "Preparando…", "Sin ffmpeg", "Zona > 30 s", "Error".
+                         Vive ACÁ, en el transporte, y no encima del video: el VideoView es un HWND
+                         y le gana a cualquier elemento de WPF que se le ponga arriba (airspace).
+                         Lo escribe SectorView.SyncPingPong. -->
+                    <TextBlock x:Name="PingPongState" VerticalAlignment="Center" Margin="10,0,0,0"
+                               FontSize="10" FontStyle="Italic" Visibility="Collapsed"
+                               ToolTipService.ShowOnDisabled="True"
+                               AutomationProperties.AutomationId="PingPongState" />
                 </StackPanel>
 
                 <ctl:LoopTimeline x:Name="Timeline" Grid.Row="1" Margin="0,2,0,0"

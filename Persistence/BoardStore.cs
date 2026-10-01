@@ -126,6 +126,15 @@ public static class BoardStore
         public bool Muted { get; set; }
 
         /// <summary>
+        /// Loop ida y vuelta pedido (ver SectorNode.PingPong). ⚠ Nullable y escrito SOLO cuando
+        /// es true: un archivo anterior a la feature (sin el campo) y un sector con el ping-pong
+        /// apagado describen lo mismo, y tienen que normalizar igual — si no, todo .mboard viejo
+        /// se leería como modificado al abrirlo. Se guarda la INTENCIÓN, nunca el archivo
+        /// generado: ese es un temporal descartable que se rehace al abrir.
+        /// </summary>
+        public bool? PingPong { get; set; }
+
+        /// <summary>
         /// SOLO en archivos del formato VIEJO: ahí el volumen general vivía en el nodo raíz,
         /// porque el archivo era un único board. Al leerlos se muda a la pestaña
         /// (<see cref="TabDto.MasterVolume"/>) y acá queda en null: el v2 nunca lo escribe.
@@ -302,6 +311,7 @@ public static class BoardStore
             // describen el mismo board.
             tab.MasterVolume = MasterOrNull(tab.MasterVolume);
             tab.Root!.MasterVolume = null;
+            NormalizeSectors(tab.Root);
         }
 
         // El panel: vacío = ausente (la misma regla que al escribir). Sus sectores son SIEMPRE
@@ -309,13 +319,29 @@ public static class BoardStore
         if (file.Dock is { } dock)
         {
             dock.Sectors = (dock.Sectors ?? []).Where(s => s is not null && s.Type != "split").ToList();
-            foreach (var sector in dock.Sectors) sector.MasterVolume = null;
+            foreach (var sector in dock.Sectors)
+            {
+                sector.MasterVolume = null;
+                NormalizeSectors(sector);
+            }
             dock.Width = NormalizeWidth(dock.Width);
             if (dock.Sectors.Count == 0) file.Dock = null;
         }
 
         file.Version = FormatVersion;
         return file;
+    }
+
+    /// <summary>
+    /// La MISMA regla que al escribir, aplicada a lo leído: un <c>"PingPong": false</c> explícito
+    /// (archivo tocado a mano) y la ausencia describen lo mismo. Ver <see cref="NodeDto.PingPong"/>.
+    /// </summary>
+    private static void NormalizeSectors(NodeDto? node)
+    {
+        if (node is null) return;
+        if (node.PingPong != true) node.PingPong = null;
+        NormalizeSectors(node.First);
+        NormalizeSectors(node.Second);
     }
 
     #endregion
@@ -366,6 +392,7 @@ public static class BoardStore
             LoopEnabled = sector.LoopEnabled,
             Volume = sector.Volume,
             Muted = sector.IsMuted,
+            PingPong = sector.PingPong ? true : null,
         },
         _ => new NodeDto(),
     };
@@ -403,6 +430,9 @@ public static class BoardStore
             sector.MarkMissing(path);
             sector.LoopStartMs = dto.LoopStart;
             sector.LoopEndMs = dto.LoopEnd;
+            // El pedido de ping-pong también se conserva en un sector ausente, por el mismo
+            // motivo que los markers: si se perdiera acá, el primer guardado lo borraría.
+            sector.PingPong = dto.PingPong == true;
             return sector;
         }
 
@@ -413,6 +443,12 @@ public static class BoardStore
         // duración: en ese caso el primer Tick lo va a completar solo.
         sector.LoopStartMs = dto.LoopStart;
         sector.LoopEndMs = dto.LoopEnd;
+
+        // DESPUÉS de los markers: prenderlo pide la generación con esa zona. El clip arranca con
+        // el ORIGINAL y se pasa al generado cuando ffmpeg termina (ver SectorNode.RequestPingPong
+        // sobre por qué no "Preparando…" en negro). Sin ffmpeg en esta máquina, el pedido queda
+        // guardado y el sector dice "no disponible": abrir y guardar no lo pierde.
+        sector.PingPong = dto.PingPong == true;
 
         return sector;
     }

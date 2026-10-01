@@ -48,6 +48,11 @@ public partial class App : Application
         // tiene que demorar la primera pintada de la ventana. Ver VlcEngine.Warmup para el
         // porqué (el primer archivo arrastrado se comía el escaneo de plugins en el hilo de UI).
         VlcEngine.Warmup();
+
+        // Temporales del loop ida y vuelta que dejaron procesos que ya no existen (un crash, un
+        // cierre forzado). En otro hilo y sin tocar las carpetas de ventanas vivas: la app es
+        // multi-instancia. Ver PingPongRenderer.
+        PingPongRenderer.CleanupStale();
     }
 
     protected override void OnExit(ExitEventArgs e)
@@ -56,6 +61,10 @@ public partial class App : Application
         // los MediaPlayer de cada sector. Liberarlo con players vivos deja hilos nativos
         // decodificando sobre memoria que ya no existe.
         VlcEngine.Shutdown();
+
+        // DESPUÉS de soltar VLC: mientras un player vive, tiene su archivo generado abierto y
+        // Windows no deja borrarlo. Es caché descartable, no estado: no sobrevive a la sesión.
+        PingPongRenderer.DeleteOwnFolder();
         base.OnExit(e);
     }
 

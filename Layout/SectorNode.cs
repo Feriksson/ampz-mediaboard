@@ -153,6 +153,77 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
     public bool HasMedia => Kind != MediaKind.None;
 
+    #region Ping-pong (loop ida y vuelta) — estado
+
+    /// <summary>
+    /// Espera tras el ÚLTIMO movimiento de un marker antes de regenerar el archivo ida y vuelta.
+    /// Un arrastre de marker dispara decenas de cambios por segundo; generar en cada uno sería
+    /// lanzar y matar ffmpeg en ráfaga. 600 ms: lo que tarda en notarse que "ya lo soltaste".
+    /// </summary>
+    private const int PingPongDebounceMs = 600;
+
+    /// <summary>
+    /// El usuario PIDIÓ el loop ida y vuelta. Es la INTENCIÓN (se persiste en el .mboard y viaja
+    /// en <see cref="MediaSnapshot"/>), no lo que está sonando: eso lo dice
+    /// <see cref="PingPongStatus"/>. Separarlos es lo que permite, por ejemplo, abrir un board
+    /// con ping-pong en una máquina SIN ffmpeg sin degradarlo: el pedido sobrevive, el estado
+    /// dice "no disponible", y al guardar no se pierde nada (misma lógica que el archivo ausente).
+    /// </summary>
+    [ObservableProperty] private bool _pingPong;
+
+    [ObservableProperty] private PingPongStatus _pingPongStatus;
+
+    /// <summary>Detalle del último error de ffmpeg, para el tooltip del estado.</summary>
+    [ObservableProperty] private string? _pingPongError;
+
+    /// <summary>
+    /// VLC está reproduciendo el archivo GENERADO (no el original). Mientras sea true el sector
+    /// está mudo: el generado no tiene pista de audio. Lo mira la vista para explicar por qué el
+    /// silencio y el volumen no hacen nada — sin tocar <see cref="IsMuted"/> ni <see cref="Volume"/>.
+    /// </summary>
+    [ObservableProperty] private bool _playsPingPongFile;
+
+    /// <summary>
+    /// Lo que VLC reproduce en realidad: el archivo ida y vuelta, o null = el original
+    /// (<see cref="MediaPath"/>). ⚠ <see cref="MediaPath"/> SIEMPRE es el original: persistencia,
+    /// copiar el path, archivo ausente, intercambio y fijar trabajan con él y ni se enteran de
+    /// que existe un generado. Esto es SOLO "qué abre VLC".
+    /// </summary>
+    private string? _playbackPath;
+
+    /// <summary>La clave de caché del generado cargado (ver PingPongMath.CacheKey).</summary>
+    private string? _ppKey;
+
+    /// <summary>
+    /// La zona (en tiempo ORIGINAL) con la que se generó el archivo CARGADO. Se guarda aparte de
+    /// los markers a propósito: mientras el usuario mueve un marker, el archivo viejo sigue
+    /// sonando hasta que el nuevo está listo, y su tiempo solo se puede traducir con la zona
+    /// con la que fue hecho. Traducirlo con los markers VIVOS pondría el playhead en cualquier lado.
+    /// </summary>
+    private double _ppStartMs;
+
+    private double _ppEndMs;
+
+    /// <summary>Largo del archivo generado según VLC. 0 hasta que abre. Ver <see cref="PlayLengthMs"/>.</summary>
+    private double _ppLengthMs;
+
+    /// <summary>
+    /// Posición en el tiempo del ARCHIVO QUE REPRODUCE VLC. Es lo que el loop compara y a donde
+    /// salta. En modo normal coincide con <see cref="PositionMs"/>; en ping-pong NO: ahí
+    /// PositionMs es el tiempo ORIGINAL (lo que ve el usuario) y esto el del generado. Tenerlos
+    /// separados es lo que garantiza que nada reinterprete un tiempo como el otro.
+    /// </summary>
+    private double _playMs;
+
+    private CancellationTokenSource? _ppCts;
+
+    private int _ppDiagTicks;
+
+    /// <summary>Duración del archivo que reproduce VLC (el original o el generado).</summary>
+    private double PlayLengthMs => _playbackPath is null ? DurationMs : _ppLengthMs;
+
+    #endregion
+
     /// <summary>
     /// Volumen del sector, 0..100. Es POR SECTOR y no global: en un board con varios clips
     /// corriendo, lo normal es querer escuchar uno solo y tener el resto de fondo o en silencio.
@@ -287,20 +358,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // guardado, porque ahí el Load() corre antes de que exista el VideoView.
         // El Play() lo dispara la vista vía StartPending(), ya con la superficie enganchada.
         var player = new MediaPlayer(VlcEngine.Instance) { EnableMouseInput = false, EnableKeyInput = false };
-        _pending = VlcEngine.NewMedia(path);
-
-        if (startAtMs > 0)
-        {
-            // El punto de arranque se pasa como OPCIÓN DEL MEDIA y no como un seek después del
-            // Play(). Un seek inmediato al Play todavía encuentra el input sin abrir del todo y
-            // se ignora la mitad de las veces; :start-time lo resuelve VLC al abrir el archivo.
-            //
-            // ⚠ InvariantCulture NO es opcional: en un Windows en español el separador decimal
-            // es la coma, y ":start-time=12,4" para VLC es basura. Perderías la posición sin
-            // ningún error visible.
-            var seconds = (startAtMs / 1000.0).ToString("0.###", CultureInfo.InvariantCulture);
-            _pending.AddOption($":start-time={seconds}");
-        }
+        _pending = NewMediaAt(path, startAtMs);
 
         Player = player;
         IsPlaying = false;
@@ -311,6 +369,31 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         LoopStartMs = 0;
         LoopEndMs = 0;
         OnPropertyChanged(nameof(HasMedia));
+    }
+
+    /// <summary>
+    /// Un Media NUEVO para <paramref name="path"/> que arranca en <paramref name="startAtMs"/>.
+    /// TODO arranque de reproducción pasa por acá (carga, re-montaje, relanzamiento del loop,
+    /// cambio original ↔ ping-pong), y SIEMPRE con un Media recién creado: ver bug 5 en el
+    /// CLAUDE.md — las opciones de un Media sobreviven a Stop()+Play(), así que reusar uno con
+    /// <c>:start-time</c> relanza en la posición vieja.
+    /// </summary>
+    private static LibVLCSharp.Shared.Media NewMediaAt(string path, double startAtMs)
+    {
+        var media = VlcEngine.NewMedia(path);
+        if (startAtMs > 0)
+        {
+            // El punto de arranque se pasa como OPCIÓN DEL MEDIA y no como un seek después del
+            // Play(). Un seek inmediato al Play todavía encuentra el input sin abrir del todo y
+            // se ignora la mitad de las veces; :start-time lo resuelve VLC al abrir el archivo.
+            //
+            // ⚠ InvariantCulture NO es opcional: en un Windows en español el separador decimal
+            // es la coma, y ":start-time=12,4" para VLC es basura. Perderías la posición sin
+            // ningún error visible.
+            var seconds = (startAtMs / 1000.0).ToString("0.###", CultureInfo.InvariantCulture);
+            media.AddOption($":start-time={seconds}");
+        }
+        return media;
     }
 
     /// <summary>
@@ -328,11 +411,18 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
         // Para tools/test-replace.ps1: con qué ventana arranca cada clip. Es lo que demostró que
         // la ventana suelta del reemplazo NO era un HWND en cero (ver StartWhenSurfaceReady).
-        DiagLog.Write($"play {Title} hwnd=0x{Player.Hwnd:X}");
+        // src= dice QUÉ archivo arranca: tools/test-pingpong.ps1 distingue así el generado del original.
+        DiagLog.Write($"play {Title} hwnd=0x{Player.Hwnd:X} src={_playbackPath ?? MediaPath}");
         Player.Play(media);
         // Después del Play, libvlc se queda con su propia referencia al media: soltar la nuestra
         // acá es correcto y evita filtrar un objeto nativo por cada clip cargado.
         media.Dispose();
+
+        // El reloj de la extrapolación arranca AHORA, no cuando se preparó el clip: entre una
+        // cosa y la otra pasa la espera de la superficie y de las liberaciones (cientos de ms), y
+        // el primer Tick se los sumaba al playhead — visto en el DiagLog como un salto hacia
+        // adelante seguido de un retroceso apenas arrancaba el ping-pong.
+        Reanchor(_playMs);
 
         IsPlaying = true;
         ApplyAudio();
@@ -355,10 +445,16 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         double LoopEndMs,
         bool LoopEnabled,
         int Volume,
-        bool IsMuted);
+        bool IsMuted,
+        bool PingPong);
 
+    /// <summary>
+    /// ⚠ PositionMs es SIEMPRE tiempo ORIGINAL (también en ping-pong): el destino recarga el
+    /// clip original desde ahí, y si el ping-pong viaja encendido, lo regenera (o lo toma del
+    /// caché) y se pasa al generado solo — ver <see cref="Restore"/>.
+    /// </summary>
     public MediaSnapshot TakeSnapshot() => new(
-        MediaPath, MissingPath, PositionMs, LoopStartMs, LoopEndMs, LoopEnabled, Volume, IsMuted);
+        MediaPath, MissingPath, PositionMs, LoopStartMs, LoopEndMs, LoopEnabled, Volume, IsMuted, PingPong);
 
     /// <summary>Aplica una foto tomada con <see cref="TakeSnapshot"/>. Vacía el sector si la foto está vacía.</summary>
     public void Restore(MediaSnapshot snapshot)
@@ -386,6 +482,11 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         LoopStartMs = snapshot.LoopStartMs;
         LoopEndMs = snapshot.LoopEndMs;
         LoopEnabled = snapshot.LoopEnabled;
+
+        // ÚLTIMO, después de los markers: prenderlo pide la generación con la zona que ya quedó
+        // puesta. El clip arranca con el original (desde donde iba) y se pasa al generado cuando
+        // está listo — con el caché caliente (intercambiar, fijar) es cosa de milisegundos.
+        PingPong = snapshot.PingPong;
     }
 
     private void LoadImage(string path)
@@ -444,12 +545,15 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         var loopStart = LoopStartMs;
         var loopEnd = LoopEndMs;
         var loopEnabled = LoopEnabled;
+        var pingPong = PingPong;
 
         Load(path);
 
         LoopStartMs = loopStart;
         LoopEndMs = loopEnd;
         LoopEnabled = loopEnabled;
+        // El ping-pong es un ajuste de la zona, igual que los markers: re-vincular lo conserva.
+        PingPong = pingPong;
     }
 
     /// <summary>
@@ -479,11 +583,22 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         if (_pending is not null) return;
         if (Kind != MediaKind.Video || MediaPath is not { } path) return;
 
+        // En ping-pong se re-monta EL GENERADO, desde el punto del generado donde iba: pasar por
+        // el original sería un segundo cambio de archivo (original → generado) por nada. Es un
+        // Media nuevo con su :start-time, como todo arranque (bug 5), y el loop vuelve a 0 con
+        // un seek sobre ESE media, nunca con Stop()+Play() — así el :start-time no se re-aplica.
+        if (_playbackPath is { } generated)
+        {
+            SwitchPlayback(generated, _playMs);
+            return;
+        }
+
         var position = PositionMs;
         var duration = DurationMs;
         var loopStart = LoopStartMs;
         var loopEnd = LoopEndMs;
         var loopEnabled = LoopEnabled;
+        var pingPong = PingPong;
 
         Load(path, position);
 
@@ -494,6 +609,8 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         LoopStartMs = loopStart;
         LoopEndMs = loopEnd;
         LoopEnabled = loopEnabled;
+        // Ping-pong pedido pero todavía no activo (generando, o con error): se vuelve a pedir.
+        PingPong = pingPong;
     }
 
     /// <summary>
@@ -510,6 +627,9 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         _pending?.Dispose();
         _pending = null;
 
+        // Una generación en curso para el clip que se va se MATA: nadie va a mirar su resultado.
+        CancelPingPong();
+
         var player = Player;
 
         // ⚠ ORDEN CRÍTICO: desenganchar ANTES de liberar. Player = null dispara SyncRender en la
@@ -523,6 +643,15 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // detiene en paralelo, sin compartir ningún estado.
         if (player is not null) VlcEngine.Release(player);
 
+        // El generado se suelta DESPUÉS de entregar el player: se borra cuando ese Stop() termina
+        // (mientras tanto VLC lo tiene abierto). Ver PingPongRenderer.Release.
+        if (_playbackPath is { } generated) PingPongRenderer.Release(generated);
+        _playbackPath = null;
+        _ppKey = null;
+        _ppLengthMs = 0;
+        _playMs = 0;
+        PlaysPingPongFile = false;
+
         ImageSource = null;
         MediaPath = null;
         MissingPath = null;
@@ -533,6 +662,12 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         PositionMs = 0;
         LoopStartMs = 0;
         LoopEndMs = 0;
+        // El ping-pong es de la zona de ESTE clip, igual que los markers: un sector vaciado (o que
+        // recibe otro clip) arranca sin él. Quien quiere conservarlo (Relink, Remount, Restore)
+        // lo vuelve a poner DESPUÉS, igual que hace con los markers.
+        PingPong = false;
+        PingPongStatus = PingPongStatus.Off;
+        PingPongError = null;
         OnPropertyChanged(nameof(HasMedia));
     }
 
@@ -565,7 +700,9 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
             // el loop: un Play() sin media nuevo re-aplica el `:start-time` viejo.
             if (Player.State is VLCState.Ended or VLCState.Stopped)
             {
-                RestartFrom(LoopEnabled ? LoopStartMs : 0);
+                // En ping-pong, el principio del loop es el 0 del archivo GENERADO (= marker A).
+                // Pasarle LoopStartMs acá sería meter un tiempo ORIGINAL en el reloj del generado.
+                RestartFrom(_playbackPath is not null ? 0 : LoopEnabled ? LoopStartMs : 0);
             }
             else
             {
@@ -661,22 +798,19 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// </summary>
     private void RestartFrom(double ms)
     {
-        if (Player is null || MediaPath is not { } path) return;
+        // ⚠ ms es tiempo del archivo QUE SE REPRODUCE (el generado, en ping-pong). Y el archivo
+        // que se relanza es ese mismo: relanzar el original en medio del ping-pong sería salirse
+        // del modo sin que nadie lo pidiera.
+        if (Player is null || (_playbackPath ?? MediaPath) is not { } path) return;
 
-        var media = VlcEngine.NewMedia(path);
-        if (ms > 0)
-        {
-            // InvariantCulture obligatorio: ver Load(). ":start-time=12,4" para VLC es basura.
-            var seconds = (ms / 1000.0).ToString("0.###", CultureInfo.InvariantCulture);
-            media.AddOption($":start-time={seconds}");
-        }
+        var media = NewMediaAt(path, ms);
 
         // Stop() antes de Play() es obligatorio: desde el estado Ended, Play() solo no rearranca.
         Player.Stop();
         Player.Play(media);
         media.Dispose(); // libvlc se queda con su propia referencia.
 
-        PositionMs = ms;
+        SetPlayPosition(ms);
         Reanchor(ms);
         _lastSeekTick = Environment.TickCount64;
         _seekCooldownMs = RelaunchCooldownMs;
@@ -684,15 +818,45 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         ApplyAudio();
     }
 
+    /// <summary>
+    /// Busca en el clip. <paramref name="ms"/> es tiempo ORIGINAL: es lo que manda la timeline
+    /// (el click en el riel), que siempre habla del clip que soltó el usuario.
+    ///
+    /// En ping-pong se traduce a la IDA del generado (<see cref="PingPongMath.FromOriginal"/>):
+    /// cada punto de la zona aparece dos veces en el archivo y la ida es la lectura obvia de
+    /// "llevame acá" — de ahí el clip avanza, como en el modo normal. No se sale del ping-pong:
+    /// un click no es un pedido de cambiar de modo, y salir costaría un re-montaje.
+    /// </summary>
     public void SeekTo(double ms)
     {
+        if (_playbackPath is not null) SeekPlayback(PingPongMath.FromOriginal(ms, _ppStartMs, _ppEndMs));
+        else SeekPlayback(ms);
+    }
+
+    /// <summary>Seek en el tiempo del archivo que reproduce VLC. Ver <see cref="_playMs"/>.</summary>
+    private void SeekPlayback(double ms)
+    {
         if (Player is null) return;
-        var clamped = Math.Clamp(ms, 0, DurationMs > 0 ? DurationMs : ms);
+        var length = PlayLengthMs;
+        var clamped = Math.Clamp(ms, 0, length > 0 ? length : Math.Max(0, ms));
         Player.Time = (long)clamped;
-        PositionMs = clamped;
+        SetPlayPosition(clamped);
         Reanchor(clamped);
         _lastSeekTick = Environment.TickCount64;
         _seekCooldownMs = ReseekCooldownMs;
+    }
+
+    /// <summary>
+    /// Fija la posición de reproducción y el playhead VISIBLE a la vez, traduciendo si hace falta.
+    /// Es el ÚNICO lugar donde el tiempo del generado se convierte en tiempo original: si la
+    /// traducción estuviera repartida, tarde o temprano un camino se olvidaría de hacerla.
+    /// </summary>
+    private void SetPlayPosition(double playMs)
+    {
+        _playMs = playMs;
+        PositionMs = _playbackPath is null
+            ? playMs
+            : PingPongMath.ToOriginal(playMs, _ppStartMs, _ppEndMs);
     }
 
     /// <summary>
@@ -712,6 +876,10 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// Latido del sector: lo llama el ÚNICO timer del board (no uno por celda — 8 DispatcherTimer
     /// compitiendo por la cola del Dispatcher es peor que uno que itera 8 sectores).
     /// Acá pasan dos cosas: refrescar la posición para la timeline, y hacer cumplir la zona de loop.
+    ///
+    /// ⚠ Todo el cálculo de posición y de loop corre en el tiempo del ARCHIVO QUE SE REPRODUCE
+    /// (<see cref="_playMs"/>). Recién al final se traduce a tiempo original para la timeline
+    /// (<see cref="SetPlayPosition"/>). En modo normal las dos cosas coinciden; en ping-pong no.
     /// </summary>
     public void Tick()
     {
@@ -727,7 +895,18 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // cubriendo el CLIP ENTERO — un clip recién soltado tiene que loopear de punta a punta
         // sin que toques un solo marker.
         var length = player.Length;
-        if (length > 0 && Math.Abs(DurationMs - length) > 1)
+        if (length > 0 && _playbackPath is not null)
+        {
+            // ⚠ El largo del GENERADO no es la duración del clip: DurationMs es del ORIGINAL (la
+            // timeline mapea el clip entero) y no se toca. Pisarla con el largo del generado
+            // estiraría la timeline al doble y los markers quedarían en cualquier lado.
+            if (Math.Abs(_ppLengthMs - length) > 1)
+            {
+                _ppLengthMs = length;
+                ApplyAudio();
+            }
+        }
+        else if (length > 0 && Math.Abs(DurationMs - length) > 1)
         {
             DurationMs = length;
             if (LoopEndMs <= LoopStartMs) LoopEndMs = length;
@@ -735,8 +914,13 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
             // El media acaba de abrir de verdad: recién ahora VLC tiene salida de audio y
             // acepta el volumen. Ver ApplyAudio.
             ApplyAudio();
+
+            // Y recién ahora se conoce la zona efectiva: un ping-pong pedido antes (al abrir un
+            // board, al soltar el clip y apretar P enseguida) estaba esperando esto.
+            if (PingPong) RequestPingPong(debounce: false);
         }
 
+        var playLength = PlayLengthMs;
         var ended = player.State is VLCState.Ended or VLCState.Stopped;
 
         // ⚠ Time devuelve -1 cuando el clip TERMINÓ. Colapsarlo a 0 (como se hacía antes) era un
@@ -749,7 +933,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         if (time >= 0)
         {
             // Cada lectura NUEVA reancla la estimación. La comparación es contra el último valor
-            // real y no contra PositionMs a propósito: PositionMs está extrapolado, así que casi
+            // real y no contra la posición a propósito: la posición está extrapolada, así que casi
             // nunca coincide con lo que devuelve VLC y el ancla no se movería nunca.
             if (time != _lastRealTimeMs)
             {
@@ -765,38 +949,64 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
                 : 0;
 
             var estimated = _lastRealTimeMs + elapsed;
-            PositionMs = DurationMs > 0 ? Math.Min(estimated, DurationMs) : estimated;
+            SetPlayPosition(playLength > 0 ? Math.Min(estimated, playLength) : estimated);
         }
-        else if (ended && DurationMs > 0) PositionMs = DurationMs;
+        else if (ended && playLength > 0) SetPlayPosition(playLength);
 
         IsPlaying = player.IsPlaying;
+
+        // Para tools/test-pingpong.ps1: el playhead en tiempo ORIGINAL mientras suena el
+        // generado. Es lo que prueba que la timeline va para adelante Y para atrás. ~10 por
+        // segundo alcanza y no ensucia el log. Solo con AMPZ_DIAG_LOG.
+        if (_playbackPath is not null && DiagLog.Enabled && ++_ppDiagTicks % 3 == 0)
+            DiagLog.Write($"pppos {Title} {PositionMs:0} play={_playMs:0}");
 
         EnforceLoop(ended);
     }
 
     private void EnforceLoop(bool ended)
     {
-        if (!LoopEnabled || Player is null || DurationMs <= 0) return;
+        var length = PlayLengthMs;
+        if (Player is null || length <= 0) return;
 
-        // La zona se sanea en cada vuelta en vez de confiar en los campos crudos: si LoopEnd
-        // todavía no se inicializó, o quedó fuera de rango por un board editado a mano, el loop
-        // igual funciona sobre el clip entero en vez de no hacer nada.
-        var start = Math.Clamp(LoopStartMs, 0, DurationMs);
-        var end = LoopEndMs > start ? Math.Min(LoopEndMs, DurationMs) : DurationMs;
+        double start, end;
+        if (_playbackPath is not null)
+        {
+            // PING-PONG: la zona es el archivo generado ENTERO hasta el final de la vuelta (2d),
+            // en tiempo del generado. Los markers NO entran acá: pueden estar moviéndose (el
+            // archivo nuevo se está generando) y el que suena es el VIEJO, hecho con otra zona.
+            // Y el LOOP del usuario tampoco: el ping-pong es un loop por definición (apagar LOOP
+            // apaga el ping-pong, ver OnLoopEnabledChanged).
+            start = 0;
+            end = PingPongMath.LoopEndMs(_ppStartMs, _ppEndMs);
+            if (end <= 0) end = length;
+        }
+        else
+        {
+            if (!LoopEnabled) return;
+
+            // La zona se sanea en cada vuelta en vez de confiar en los campos crudos: si LoopEnd
+            // todavía no se inicializó, o quedó fuera de rango por un board editado a mano, el
+            // loop igual funciona sobre el clip entero en vez de no hacer nada. Es la MISMA regla
+            // que usa el ping-pong para decidir qué zona invertir (PingPongMath.EffectiveZone).
+            (start, end) = PingPongMath.EffectiveZone(LoopStartMs, LoopEndMs, DurationMs);
+        }
 
         // Se cierra la zona un poco antes del final REAL para que el loop sea un seek y no una
         // reapertura del archivo (que es el intervalo negro). Ver TailGuardMs.
         //
         // ⚠ Es un Min, así que a un marker B puesto a mitad de clip NO lo toca: ahí
-        // `DurationMs - TailGuardMs` es más grande y gana el marker del usuario. Solo muerde
-        // cuando B está pegado al final, que es justo el caso de la zona por defecto.
+        // `length - TailGuardMs` es más grande y gana el marker del usuario. Solo muerde
+        // cuando B está pegado al final, que es justo el caso de la zona por defecto. En
+        // ping-pong NO muerde nunca: el colchón del generado (PingPongMath.PadMs) deja el final
+        // de la vuelta 400 ms antes del final del archivo.
         //
         // Las dos condiciones son guardas de cordura, no adorno:
         //  - clips MUY cortos (un gif de medio segundo) no tienen 150ms para regalar;
         //  - si el usuario puso A casi al final, recortar dejaría end <= start → "ya pasaste B"
         //    daría verdadero en cada tick y el clip quedaría en una ráfaga de seeks.
-        var tail = DurationMs - TailGuardMs;
-        if (DurationMs > 1000 && tail > start + LoopGuardMs) end = Math.Min(end, tail);
+        var tail = length - TailGuardMs;
+        if (length > 1000 && tail > start + LoopGuardMs) end = Math.Min(end, tail);
 
         if (Environment.TickCount64 - _lastSeekTick < _seekCooldownMs) return;
 
@@ -806,8 +1016,8 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         //  2) el playhead llegó (o está por llegar) al marker B — el loop normal, a mitad de clip;
         //  3) el playhead quedó ANTES del marker A — pasa al arrastrar A hacia adelante mientras
         //     reproduce. Sin este caso el video seguiría corriendo fuera de la zona marcada.
-        var pastEnd = PositionMs >= end - LoopGuardMs;
-        var beforeStart = PositionMs < start - LoopGuardMs;
+        var pastEnd = _playMs >= end - LoopGuardMs;
+        var beforeStart = _playMs < start - LoopGuardMs;
         if (!ended && !pastEnd && !beforeStart) return;
 
         if (ended)
@@ -819,8 +1029,258 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
             return;
         }
 
-        SeekTo(start);
+        SeekPlayback(start);
     }
+
+    #region Ping-pong (loop ida y vuelta) — orquestación
+
+    /// <summary>
+    /// El ⇄ del sector y la tecla P. Solo para video: una imagen no tiene zona que invertir.
+    ///
+    /// Una zona de más de 30 s se RECHAZA acá mismo: el toggle queda apagado y el sector dice por
+    /// qué. Se eligió rechazar y NO recortar la zona a 30 s: recortar reproduciría un tramo
+    /// distinto del que muestran los markers, y el usuario no tendría cómo saberlo mirando la
+    /// timeline. Rechazar es explícito, y moviendo un marker lo resolvés en un segundo.
+    /// </summary>
+    public void TogglePingPong()
+    {
+        if (Kind != MediaKind.Video) return;
+
+        if (PingPong)
+        {
+            PingPong = false;
+            return;
+        }
+
+        // Sin ffmpeg no se prende: sería un pedido que nunca va a cumplirse. (Un board que YA lo
+        // trae prendido de otra máquina lo conserva: ver PingPongStatus.Unavailable.)
+        if (!PingPongRenderer.IsAvailable)
+        {
+            PingPongStatus = PingPongStatus.Unavailable;
+            return;
+        }
+
+        if (DurationMs > 0 && Refusal(ZoneForPingPong()) is { } refusal)
+        {
+            PingPongStatus = refusal;
+            return;
+        }
+
+        PingPong = true;
+    }
+
+    private (double Start, double End) ZoneForPingPong() =>
+        PingPongMath.EffectiveZone(LoopStartMs, LoopEndMs, DurationMs);
+
+    private static PingPongStatus? Refusal((double Start, double End) zone) =>
+        PingPongMath.Check(zone.Start, zone.End) switch
+        {
+            PingPongMath.ZoneCheck.TooLong => PingPongStatus.TooLong,
+            PingPongMath.ZoneCheck.TooShort => PingPongStatus.TooShort,
+            _ => null,
+        };
+
+    partial void OnPingPongChanged(bool value)
+    {
+        if (value)
+        {
+            // Ida y vuelta es un MODO del loop: sin loop no hay zona que invertir. Prenderlo
+            // prende el LOOP; apagar el LOOP lo apaga (ver OnLoopEnabledChanged). Así el botón
+            // LOOP nunca miente sobre lo que está pasando.
+            if (!LoopEnabled) LoopEnabled = true;
+            PingPongError = null;
+            RequestPingPong(debounce: false);
+            return;
+        }
+
+        CancelPingPong();
+        PingPongStatus = PingPongStatus.Off;
+        PingPongError = null;
+        if (_playbackPath is not null) LeavePingPong();
+    }
+
+    partial void OnLoopEnabledChanged(bool value)
+    {
+        if (!value && PingPong) PingPong = false;
+    }
+
+    // Mover un marker cambia la zona → hay que regenerar. Con espera: ver PingPongDebounceMs.
+    partial void OnLoopStartMsChanged(double value) => OnZoneChanged();
+
+    partial void OnLoopEndMsChanged(double value) => OnZoneChanged();
+
+    private void OnZoneChanged()
+    {
+        if (PingPong) RequestPingPong(debounce: true);
+        // Un rechazo ("Zona > 30 s") explica el ÚLTIMO intento. Si el usuario ya movió los
+        // markers para arreglarlo, el cartel quedaría acusando a una zona que ya no existe.
+        else if (PingPongStatus is PingPongStatus.TooLong or PingPongStatus.TooShort) PingPongStatus = PingPongStatus.Off;
+    }
+
+    private void CancelPingPong()
+    {
+        if (_ppCts is null) return;
+        _ppCts.Cancel();
+        _ppCts.Dispose();
+        _ppCts = null;
+    }
+
+    /// <summary>
+    /// Pide (re)generar el archivo ida y vuelta para la zona ACTUAL. Cancela cualquier pedido
+    /// anterior — incluida una generación a medias, cuyo ffmpeg se mata.
+    ///
+    /// Mientras genera, el sector sigue reproduciendo lo que tenía: el ORIGINAL (al prender, al
+    /// abrir un board) o el generado VIEJO (al mover un marker). Se eligió seguir mostrando algo
+    /// en vez de un "Preparando…" en negro: la generación tarda 0,5–2 s, y un sector que se
+    /// apaga cada vez que tocás un marker se lee como que la app se rompió. El estado
+    /// "Preparando…" va en el transporte (WPF puro): encima del video no se vería, el VideoView
+    /// es un HWND y le gana a cualquier cosa de WPF (airspace).
+    /// </summary>
+    private void RequestPingPong(bool debounce)
+    {
+        if (!PingPong || Kind != MediaKind.Video || MediaPath is null) return;
+
+        if (!PingPongRenderer.IsAvailable)
+        {
+            PingPongStatus = PingPongStatus.Unavailable;
+            return;
+        }
+
+        CancelPingPong();
+
+        // Sin duración no hay zona efectiva. El Tick lo vuelve a pedir cuando VLC la informa.
+        if (DurationMs <= 0)
+        {
+            PingPongStatus = PingPongStatus.Preparing;
+            return;
+        }
+
+        _ppCts = new CancellationTokenSource();
+        _ = RunPingPongAsync(debounce ? PingPongDebounceMs : 0, _ppCts.Token);
+    }
+
+    /// <summary>
+    /// ⚠ Corre en el hilo de UI (lo llaman los setters y el Tick): los await vuelven al
+    /// Dispatcher por su SynchronizationContext, así que todo lo que toca al nodo y a VLC sigue
+    /// en el hilo de UI. Lo único que corre afuera es ffmpeg, en su propio proceso.
+    /// </summary>
+    private async Task RunPingPongAsync(int delayMs, CancellationToken ct)
+    {
+        var source = MediaPath!;
+        try
+        {
+            if (delayMs > 0) await Task.Delay(delayMs, ct);
+            if (!PingPong || MediaPath != source || DurationMs <= 0) return;
+
+            var zone = ZoneForPingPong();
+
+            // La zona se valida DESPUÉS de la espera y no en cada movimiento del marker: un
+            // arrastre que pasa un instante por 31 s y vuelve no tiene que apagar nada.
+            if (Refusal(zone) is { } refusal)
+            {
+                PingPong = false;           // apaga y vuelve al original (OnPingPongChanged)...
+                PingPongStatus = refusal;   // ...y deja dicho por qué, DESPUÉS del Off que pone eso.
+                return;
+            }
+
+            var key = PingPongMath.CacheKey(source, File.GetLastWriteTimeUtc(source), zone.Start, zone.End);
+            if (_playbackPath is not null && key == _ppKey)
+            {
+                PingPongStatus = PingPongStatus.Active;   // el marker volvió a donde estaba
+                return;
+            }
+
+            PingPongStatus = PingPongStatus.Preparing;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var file = await PingPongRenderer.GetOrCreateAsync(source, zone.Start, zone.End, ct);
+
+            // El mundo pudo cambiar mientras ffmpeg trabajaba (otro marker, otro clip, apagado).
+            if (ct.IsCancellationRequested || !PingPong || MediaPath != source)
+            {
+                PingPongRenderer.DeleteWhenUnused(file);
+                return;
+            }
+
+            DiagLog.Write($"pingpong ready {file} {clock.ElapsedMilliseconds}ms zona={zone.Start:0}-{zone.End:0}");
+
+            PingPongRenderer.Acquire(file);
+            var previous = _playbackPath;
+            _ppKey = key;
+            _ppStartMs = zone.Start;
+            _ppEndMs = zone.End;
+            SwitchPlayback(file, 0);
+            if (previous is not null) PingPongRenderer.Release(previous);
+            PingPongStatus = PingPongStatus.Active;
+        }
+        catch (OperationCanceledException)
+        {
+            // Un pedido más nuevo lo reemplazó, o el sector se descargó. No es un error.
+        }
+        catch (Exception ex)
+        {
+            if (ct.IsCancellationRequested) return;
+
+            // Una falla de ffmpeg NUNCA voltea la app: se asienta el porqué y el sector vuelve
+            // al original (si seguía sonando un generado VIEJO, su zona ya no es la de los
+            // markers). El pedido se CONSERVA: mover un marker o re-prender lo reintenta.
+            PingPongRenderer.LogFailure(source, ex);
+            if (MediaPath != source || !PingPong) return;
+            if (_playbackPath is not null) LeavePingPong();
+            PingPongError = ex.Message;
+            PingPongStatus = PingPongStatus.Error;
+        }
+    }
+
+    /// <summary>Vuelve al original desde el punto (original) donde iba el ping-pong.</summary>
+    private void LeavePingPong()
+    {
+        var generated = _playbackPath!;
+        _ppKey = null;
+        SwitchPlayback(null, PositionMs);
+        PingPongRenderer.Release(generated);
+    }
+
+    /// <summary>
+    /// Cambia QUÉ archivo reproduce VLC (original ↔ generado) sin tocar nada del modelo: el
+    /// clip, los markers, el volumen y la duración son los mismos.
+    ///
+    /// Va por el MISMO camino seguro que una carga, y por eso no hay nada nuevo que pueda fallar:
+    ///  · player NUEVO con un Media NUEVO pendiente (bug 5: nada de reusar un Media con
+    ///    <c>:start-time</c>; bug 4: un player no cambia de ventana en caliente);
+    ///  · el viejo se desengancha (<c>Player = null</c>) ANTES de entregarlo a
+    ///    <see cref="VlcEngine.Release"/>, que lo detiene en otro hilo;
+    ///  · el Play() del nuevo lo dispara la VISTA (StartWhenSurfaceReady) con la superficie viva
+    ///    y DESPUÉS de <see cref="VlcEngine.WhenReleased"/> — si no, el vout del player viejo
+    ///    todavía tendría el HWND y VLC abriría su ventana propia (bugs 1 y 6).
+    /// Cuesta lo mismo que un re-montaje: un clip que se reabre. Pasa una vez al prender, una
+    /// al apagar y una por cada zona nueva.
+    /// </summary>
+    private void SwitchPlayback(string? generated, double startPlayMs)
+    {
+        if (MediaPath is not { } original) return;
+
+        _pending?.Dispose();
+        _pending = null;
+
+        var old = Player;
+        Player = null;
+        if (old is not null) VlcEngine.Release(old);
+
+        _playbackPath = generated;
+        _ppLengthMs = 0;
+        PlaysPingPongFile = generated is not null;
+        DiagLog.Write($"pingpong switch {generated ?? "original"} desde={startPlayMs:0}");
+
+        var player = new MediaPlayer(VlcEngine.Instance) { EnableMouseInput = false, EnableKeyInput = false };
+        _pending = NewMediaAt(generated ?? original, startPlayMs);
+        SetPlayPosition(startPlayMs);
+        Reanchor(startPlayMs);
+
+        Player = player;
+        IsPlaying = false;
+    }
+
+    #endregion
 
     public void Dispose() => Unload();
 }
