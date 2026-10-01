@@ -79,6 +79,8 @@ public partial class SectorView : UserControl
         PlayButton.Click += (_, _) => _node?.TogglePlay();
         BrowseButton.Click += (_, _) => BrowseForMedia();
         RelinkButton.Click += (_, _) => BrowseForMedia();
+        // El botón solo PIDE: el modelo decide (puede rechazar) y el "apretado" vuelve por binding.
+        PingPongButton.Click += (_, _) => _node?.TogglePingPong();
 
         Timeline.SeekRequested += (_, ms) => _node?.SeekTo(ms);
 
@@ -237,6 +239,7 @@ public partial class SectorView : UserControl
 
         SyncRender();
         SyncTimeLabel();
+        SyncPingPong();
     }
 
     private void OnNodeChanged(object? sender, PropertyChangedEventArgs e)
@@ -251,6 +254,12 @@ public partial class SectorView : UserControl
             case nameof(SectorNode.PositionMs):
             case nameof(SectorNode.DurationMs):
                 SyncTimeLabel();
+                break;
+            case nameof(SectorNode.PingPong):
+            case nameof(SectorNode.PingPongStatus):
+            case nameof(SectorNode.PingPongError):
+            case nameof(SectorNode.PlaysPingPongFile):
+                SyncPingPong();
                 break;
         }
     }
@@ -565,6 +574,60 @@ public partial class SectorView : UserControl
             // plano. En cualquiera de los dos casos, no tocamos nada.
             if (ReferenceEquals(_node, node) && Video.IsVisible) node.StartPending();
         }));
+    }
+
+    private const string MuteTip = "Silenciar · Shift+click: dejar solo este";
+    private const string VolumeTip = "Volumen de este sector (el volumen general del board lo escala)";
+    private const string SilentPingPongTip =
+        "Sin sonido en ida y vuelta: el archivo generado no tiene audio. " +
+        "Tu silencio y tu volumen se conservan para cuando lo apagues.";
+
+    /// <summary>
+    /// El ⇄ y su estado. WPF puro: no toca el video (la capa de render sigue siendo lo de arriba).
+    ///
+    /// · Sin ffmpeg el botón se DESHABILITA con el porqué en el tooltip (ShowOnDisabled) — salvo
+    ///   que el sector ya lo traiga prendido de un board hecho en otra máquina: ahí tiene que
+    ///   poder apagarse.
+    /// · Cada estado que no es "activo" se escribe al lado del reloj, en ámbar si es un problema.
+    /// · En ping-pong el sector está MUDO (el generado no tiene audio). El silencio y el volumen
+    ///   NO se tocan —son del usuario y vuelven al apagarlo—: se atenúan y el tooltip explica.
+    ///   Siguen operables a propósito: el Shift+click (solo) y ajustar el nivel para después
+    ///   tienen sentido igual.
+    /// </summary>
+    private void SyncPingPong()
+    {
+        var node = _node;
+        var available = PingPongRenderer.IsAvailable;
+
+        PingPongButton.IsEnabled = node is not null && (available || node.PingPong);
+        PingPongButton.ToolTip = available
+            ? "Loop ida y vuelta (sin sonido) · P"
+            : "Loop ida y vuelta no disponible: esta instalación no trae ffmpeg";
+
+        (string? text, string brush, string? tip) state = node?.PingPongStatus switch
+        {
+            PingPongStatus.Preparing => ("Preparando…", "HintBrush",
+                "Generando el archivo ida y vuelta. Mientras tanto sigue el loop de siempre."),
+            PingPongStatus.Unavailable => ("Sin ffmpeg", "WarnBrush",
+                "Esta instalación no trae ffmpeg. El pedido queda guardado en el board, pero se reproduce el loop de siempre."),
+            PingPongStatus.TooLong => ("Zona > 30 s", "WarnBrush",
+                "Ida y vuelta admite zonas de hasta 30 segundos. Acercá los markers y volvé a prenderlo."),
+            PingPongStatus.TooShort => ("Zona muy corta", "WarnBrush",
+                "La zona es demasiado corta para ida y vuelta."),
+            PingPongStatus.Error => ("Error ⇄", "WarnBrush",
+                $"No se pudo generar el ida y vuelta: {node?.PingPongError}\nEl detalle quedó en ampz-crash.log. Mové un marker o volvé a prenderlo para reintentar."),
+            _ => (null, "HintBrush", null),
+        };
+
+        PingPongState.Text = state.text ?? string.Empty;
+        PingPongState.ToolTip = state.tip;
+        PingPongState.SetResourceReference(TextBlock.ForegroundProperty, state.brush);
+        PingPongState.Visibility = state.text is null ? Visibility.Collapsed : Visibility.Visible;
+
+        var silent = node?.PlaysPingPongFile == true;
+        MuteButton.Opacity = VolumeSlider.Opacity = silent ? 0.4 : 1;
+        MuteButton.ToolTip = silent ? SilentPingPongTip : MuteTip;
+        VolumeSlider.ToolTip = silent ? SilentPingPongTip : VolumeTip;
     }
 
     private void SyncTimeLabel()

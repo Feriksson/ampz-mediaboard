@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Prueba del loop ida y vuelta con ffmpeg DE VERDAD (el que viaja con la app, build LGPL).
+    Genera un clip sintetico, le pide a PingPongRenderer el archivo ida y vuelta y mide:
+    duracion, que la segunda mitad este INVERTIDA, que el corte sea exacto al cuadro (fuente con
+    GOP largo), cache, cancelacion (ffmpeg muerto, sin archivos a medias) y falla controlada.
+    No toca VLC. Sale 0 si pasa, 1 si falla.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <AssemblyName>PingPongProbe</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\AmpzMediaBoard.csproj" />
+  </ItemGroup>
+
+</Project>

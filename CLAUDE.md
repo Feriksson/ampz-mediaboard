@@ -92,6 +92,10 @@ dotnet publish AmpzMediaBoard.csproj -c Release -r win-x64 --self-contained true
 Autocontenido: **no necesita .NET instalado en la máquina destino**. Pesa ~411 MB (≈279 MB son los
 plugins de VLC, ≈132 MB el runtime de .NET). Arranca en ~0,9 s.
 
+**+134 MB de ffmpeg** (`publish\ffmpeg\`, el loop ida y vuelta): medido 244 → 378 MB con el VLC ya
+podado a x64. Lo copia el `.csproj` solo si existe `third_party/ffmpeg/` — **corré
+`tools/fetch-ffmpeg.ps1` antes de publicar**, o el Release sale sin la feature (el ⇄ deshabilitado).
+
 ⚠ Lo que el `.csproj` NO activa, y es a propósito — no lo "optimices" agregándolo:
 - **`PublishTrimmed` → NO.** WPF resuelve tipos por reflexión desde XAML y LibVLCSharp usa
   callbacks nativos. El trimmer se come lo que nadie referencia estáticamente y el error aparece
@@ -411,6 +415,135 @@ Anotado como v2; NO está implementado.
 
 `LibVLC` se crea con `--no-input-fast-seek` (seek preciso, no por keyframe) para que los markers
 caigan donde los pusiste y no ~1s antes.
+
+### Loop IDA Y VUELTA (ping-pong): ffmpeg pre-genera la zona invertida (T6, 2026-09-30)
+
+El ⇄ del transporte (o `P`) hace que la zona A→B se reproduzca hacia adelante y después hacia
+atrás, en bucle. **libvlc no reproduce al revés** (no acepta velocidad negativa, y simularlo con
+seeks cuadro a cuadro sobre H.264 es inviable: cada seek decodifica desde el keyframe anterior).
+Por eso **ffmpeg pre-genera UN archivo** con la zona hacia adelante + la zona invertida, y el sector
+loopea ESE archivo con la maquinaria de loop de siempre. Límites aceptados por el usuario: **sin
+audio**, zona de **hasta 30 s**, salida a **720p de alto como máximo**.
+
+| Pieza | Dónde | Qué hace |
+|---|---|---|
+| Reglas puras | `Media/PingPongMath.cs` | Zona efectiva, tope de 30 s, mapeo de tiempo, clave de caché, argumentos de ffmpeg. Probadas sin ffmpeg (`BoardProbe` 18–21). |
+| ffmpeg + caché | `Media/PingPongRenderer.cs` | Proceso oculto, uno a la vez, cancelable (se MATA), escritura atómica (`.partial` + rename), referencias y borrado. |
+| Orquestación | `SectorNode` (región "Ping-pong") | Debounce de 600 ms, rechazo, cambio de fuente, traducción del tiempo. |
+| UI | `SectorView` (`SyncPingPong`) | ⇄ + estado al lado del reloj. WPF puro: no toca el video. |
+
+**ffmpeg viaja con la app y NUNCA se commitea.** `tools/fetch-ffmpeg.ps1` baja un build **LGPL
+estático FIJADO** (BtbN, autobuild con fecha, `n8.1.3-9-g29e619e767`, verificado por **SHA256**) a
+`third_party/ffmpeg/` (gitignored), con `LICENSE.txt` y un `NOTICE.txt` (versión exacta + dónde está
+el código fuente: lo que pide la LGPL al redistribuir). El build está configurado con
+`--enable-version3` → la licencia es **LGPL v3**; sin `--enable-gpl` ni `--enable-nonfree`. El
+`.csproj` lo copia a `<output>\ffmpeg\` **solo si existe**: un clon recién hecho compila igual y la
+feature se deshabilita sola (⇄ apagado con el porqué en el tooltip). `build-installer.ps1` lo baja si
+falta, y el `.iss` se niega a compilar sin él. Pesa **+134 MB instalado** (estático: un solo `.exe`,
+más chico que el "shared" con sus 7 DLLs). NUNCA se usa un ffmpeg del PATH: puede ser GPL, de otra
+versión o sin el filtro, y la feature se comportaría distinto según quién la corra.
+
+⚠ **LGPL no trae libx264, y no hace falta: el generado es MJPEG (intra-only, `-q:v 3`) en MKV.**
+Intra-only = todo cuadro es keyframe → el salto de vuelta a 0 es un seek exacto al cuadro y barato.
+Precio: ~9 MB por segundo de zona a 720p (temporal descartable, aceptable).
+
+```
+ffmpeg -ss A -t d -i <src> -an -sn -dn -filter_complex
+  "[0:v]scale=-2:'min(720,ih)',format=yuvj420p,split=3[f][r][p];[r]reverse[rv];
+   [p]trim=duration=PAD,setpts=PTS-STARTPTS[pp];[f][rv][pp]concat=n=3:v=1:a=0[out]"
+  -map [out] -c:v mjpeg -q:v 3 <out>.mkv
+```
+- `-ss`/`-t` como opciones de **entrada**: ffmpeg busca el keyframe anterior y decodifica descartando
+  hasta A exacto (accurate_seek). **Verificado**: `PingPongProbe` compara cuadros del generado contra
+  la fuente con GOP de 2 s y A = 7,3 s (lejos de un keyframe): 0,20 de diferencia contra 4 del
+  control; con `-noaccurate_seek` la prueba se pone roja. Se usa `-t` y no `-to`: la semántica de
+  `-to` junto a un `-ss` de entrada cambió entre versiones; una duración no es ambigua.
+- Se escala **antes** del `split`: el `reverse` guarda TODOS los cuadros de la zona en RAM.
+
+**Forma del archivo, con d = B − A:** `[0,d)` ida A→B · `[d,2d)` vuelta B→A · `[2d, 2d+pad)`
+**colchón** (pad = min(400 ms, d)) que repite la ida. El loop vuelve a 0 en **2d**. El colchón existe
+por `TailGuardMs`: el loop corta 150 ms antes del final REAL del archivo (para que la vuelta sea un
+seek y no un relanzamiento en negro, ver "El INTERVALO NEGRO"); sin colchón ese recorte se comería el
+final de la vuelta y el playhead saltaría de A+150 ms a A. Con él, 2d queda lejos del final y el
+guard no muerde. Detalle medido: el cuadro k de la ida reaparece en la vuelta como cuadro 2N−1−k (el
+giro muestra B dos veces seguidas, un cuadro): imperceptible.
+
+**Mapeo del tiempo (`PingPongMath.ToOriginal`, pura):** t < d → A + t; t < 2d → B − (t − d);
+colchón → A + (t − 2d). ⚠ **`MediaPath` sigue siendo SIEMPRE el ORIGINAL**: persistencia, copiar el
+path, archivo ausente, intercambio y fijar trabajan con él y ni se enteran. Lo que VLC abre es otro
+campo (`_playbackPath`). Hay **dos relojes** y nunca se mezclan: `_playMs` (tiempo del archivo que
+suena: lo que el loop compara y a donde salta) y `PositionMs` (tiempo ORIGINAL: timeline, reloj,
+`A`/`B`). La traducción vive en UN solo lugar (`SetPlayPosition`). `DurationMs` es SIEMPRE la del
+original: pisarla con el largo del generado estiraría la timeline al doble. El generado se traduce con
+la zona **con la que se hizo** (`_ppStartMs/_ppEndMs`), no con los markers vivos: mientras movés un
+marker, el archivo viejo sigue sonando hasta que el nuevo está listo.
+
+- **Click en la timeline** en ping-pong: va a ese punto sobre la **ida** (`FromOriginal`), acotado a
+  la zona. No sale del modo (un click no es un pedido de cambiar de modo, y salir costaría un
+  re-montaje). **`A`/`B`** fijan el marker en el playhead ORIGINAL que se ve → la zona cambia → se
+  regenera. Predecible: hacen lo mismo que en modo normal.
+- **Ping-pong es un MODO del loop**: prenderlo prende LOOP; apagar LOOP (o `L`) lo apaga.
+- **Zona > 30 s se RECHAZA** (y no se recorta): el toggle queda apagado y el sector dice "Zona > 30 s".
+  Recortar reproduciría un tramo distinto del que muestran los markers sin que la timeline lo diga. Se
+  valida al prender y DESPUÉS del debounce (un arrastre que pasa un instante por 31 s no apaga nada).
+- **Sin ffmpeg / error de ffmpeg NO apagan el pedido**: el sector loopea el original y dice "Sin
+  ffmpeg" / "Error ⇄", pero `PingPong` sigue en true y se guarda. Es la regla del archivo ausente: un
+  board degradado por el entorno preguntaría "¿guardar?" al cerrar y el "sí" borraría el ajuste. El
+  error va a `ampz-crash.log` (y al DiagLog); una falla de ffmpeg nunca voltea la app.
+
+**Cambiar de fuente (original ↔ generado) es un re-montaje por el camino seguro de siempre**
+(`SectorNode.SwitchPlayback`): player NUEVO + Media NUEVO pendiente (bug 5), el viejo se desengancha
+antes de entregarlo a `VlcEngine.Release`, y el `Play()` lo dispara la vista con la superficie viva y
+DESPUÉS de `WhenReleased()` (bugs 1 y 6). `Remount` en ping-pong re-monta EL GENERADO desde donde iba
+(`:start-time` en un Media nuevo; el loop vuelve con un seek sobre ese media, nunca `Stop()+Play()`).
+Intercambiar y fijar llevan el toggle en `MediaSnapshot`: el destino arranca con el original y pasa
+al generado (del caché, en milisegundos). Pestañas de fondo: el cambio queda pendiente hasta que la
+pestaña se muestra, como cualquier clip.
+
+**Mientras genera, el sector sigue reproduciendo lo que tenía** (el original al prender o al abrir
+un board; el generado viejo al mover un marker) y dice "Preparando…" **al lado del reloj, no encima
+del video**: el VideoView es un HWND y le gana a cualquier cosa de WPF (airspace). Un sector que se
+apaga en negro cada vez que tocás un marker se lee como roto. Al abrir un `.mboard` pasa lo mismo:
+el original arranca enseguida y además es quien informa la duración, que hace falta para la zona.
+
+**Audio:** el generado no tiene pista de audio → el sector está mudo. El silencio y el volumen del
+usuario **NO se tocan** (vuelven al apagarlo): se atenúan y el tooltip lo explica. Siguen operables
+a propósito: Shift+click (solo) y ajustar el nivel para después tienen sentido igual.
+
+**Caché = temporal DESCARTABLE, no estado** (no contradice "Arranque limpio"):
+`%TEMP%\AmpzMediaBoard\pingpong\<pid>\<hash>.mkv`. El `.mboard` guarda solo `"PingPong": true` (y
+**solo** si está prendido: un archivo viejo sin el campo compara igual). La clave es SHA256 de (ruta
+completa en mayúsculas, fecha de modificación, A y B redondeados al ms, versión del formato):
+re-exportar el clip invalida; ruido de punto flotante en un marker no regenera. **Una carpeta por
+proceso** porque la app es multi-instancia: una carpeta compartida haría que la limpieza de una
+ventana borrara lo que otra reproduce. Al arrancar se borran las carpetas de procesos muertos; al
+cerrar, la propia (después de `VlcEngine.Shutdown`, cuando VLC ya soltó los archivos). Un generado
+que nadie referencia se borra en cuanto su player termina de detenerse.
+
+**Medido** (esta máquina, ffmpeg 8.1.3 LGPL): zona de 5 s ≈ **0,45 s** de generación (fuente 720p);
+zona de 30 s ≈ **2,0 s** (fuente 1080p → 720p, 100 MB) con **pico de RAM de ffmpeg ≈ 1,7 GB** —
+el `reverse` guarda la zona entera en memoria. Por eso hay **una sola generación a la vez** en toda
+la app (`PingPongRenderer.OneAtATime`) y por eso el tope de 30 s. Un ffmpeg en curso al MATAR la app
+(no al cerrarla) termina solo en ≤ 2 s; su `.partial` lo barre el próximo arranque.
+
+Regresión:
+- `tools/BoardProbe` casos 18–21 (puros): mapeo y espejo t ↔ 2d − t, rechazo > 30 s y zona efectiva,
+  clave de caché y argumentos (punto decimal con Windows en español, `-ss/-t` antes de `-i`), y
+  persistencia (solo si está prendido, sobrevive en un sector ausente, viaja al intercambiar y fijar,
+  acople con LOOP). Vistos en rojo con 7 mutaciones.
+- `tools/PingPongProbe` (ffmpeg de verdad, sin VLC): duración = 2d + colchón, sin audio, ≤ 720p,
+  MJPEG, corte exacto contra la fuente, la vuelta es la ida al revés **por índice de cuadro** (con
+  `-ss` el MKV redondea los pts al ms y los dos lados del espejo caían en cuadros vecinos: ambiguo),
+  caché, cancelar mata ffmpeg en < 500 ms sin dejar `.partial`, ffmpeg que falla. Visto en rojo sin
+  `reverse`, con `-noaccurate_seek`, con audio y sin matar al cancelar.
+- `tools/test-pingpong.ps1` (app corriendo, DiagLog + UIA): abre un board con ping-pong, exige que
+  arranque el GENERADO (`play … src=…\pingpong\…`), que el playhead ORIGINAL (`pppos`) vaya y vuelva
+  sin salir de [A, B], que el video se mueva adentro, ninguna ventana de VLC suelta, y que el ⇄
+  devuelva el original. Visto en rojo sin el cambio de fuente y con el playhead sin traducir. Sale 2
+  si la captura no se puede hacer: ⚠ captura la PANTALLA, así que si otra ventana tapa el board
+  (Windows no deja que un proceso de fondo robe el foco) mediría esa otra ventana — visto: un
+  navegador encima daba "dos capturas iguales", un rojo falso. Ahora lo detecta (`WindowFromPoint`)
+  y ese paso queda SIN MEDIR; los chequeos de DiagLog/UIA corren igual.
 
 ### ⚠ NUNCA le asignes un valor local a una DP con binding OneWay
 
@@ -973,6 +1106,9 @@ argumentos abrían varias pestañas; eso se sacó.)
   roto": un v2 roto leído como board viejo cargaría un board VACÍO en silencio, que al guardar
   pisaría el archivo bueno. Un v2 sin pestañas se trata como corrupto por lo mismo.
 - `MasterVolume` se escribe solo si difiere de 100 (misma regla que antes, ver "Audio por sector").
+- `"PingPong": true` en un sector se escribe **solo** si está prendido (misma regla: un archivo
+  viejo sin el campo compara igual). Es la intención; el archivo generado nunca se guarda (ver
+  "Loop IDA Y VUELTA").
 
 ### ⚠ MULTI-INSTANCIA ES INTENCIONAL — no le pongas un mutex
 
@@ -1121,6 +1257,7 @@ está mostrando un error que no leíste.
 | `A` | Fijar el marker de INICIO del loop en el playhead |
 | `B` | Fijar el marker de FIN del loop en el playhead |
 | `L` | Prender/apagar la zona de loop |
+| `P` | Loop **ida y vuelta** (ping-pong) del sector seleccionado: la zona va A→B y vuelve B→A. Sin sonido, zona de hasta 30 s. También el ⇄ del transporte |
 | `Ctrl+T` | Agregar una pestaña al archivo (vacía, "Board N"). También el `+` de la tira |
 | `Ctrl+W` | Quitar la pestaña activa del archivo, **sin preguntar** (queda como cambio sin guardar). Click del medio o × sobre una pestaña, igual |
 | doble click en una pestaña | Renombrarla (Enter / click afuera confirma, Esc cancela) |
@@ -1242,10 +1379,10 @@ Espacio lo consume el botón (lo lee como "apretame") y el atajo nunca llega.
 |---|---|
 | `Layout/` | El árbol: `LayoutNode`, `SplitNode`, `SectorNode` (nodo + estado del media + loop). |
 | `Board/` | `BoardViewModel` (árbol + latido + split/close + solo + volumen general), `BoardView` (materializa el árbol a controles), `BoardTab` (una pestaña: board + vista), `TabOrder` (reordenar) y `PinnedDock` (el panel fijado: fijar/desfijar/solo entre boards). |
-| `Media/` | `VlcEngine` (la instancia única de LibVLC) y `MediaKind` (qué extensión es qué). |
+| `Media/` | `VlcEngine` (la instancia única de LibVLC), `MediaKind` (qué extensión es qué) y el ping-pong: `PingPongMath` (reglas puras) y `PingPongRenderer` (ffmpeg + caché). |
 | `Controls/` | `SectorView` (**la capa de render**) y `LoopTimeline` (markers + playhead). |
 | `Persistence/` | `AppPaths` y `BoardStore`. |
-| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path, **cierre rápido** —`test-close.ps1`— , **pestañas** —`test-tabs.ps1`—, **reordenar pestañas** —`test-tab-reorder.ps1`, mouse real, sale **2** si el escritorio está en uso— **audio por sector** —`test-audio.ps1`, suena un tono bajo unos segundos— y **reemplazar el clip de un sector ocupado sin ventana suelta de VLC** —`test-replace.ps1`, bug 6—). `test-multi.ps1` y `test-boardfile.ps1` derivan el exe de `$PSScriptRoot` y generan su GIF de prueba en `%TEMP%` con ffmpeg (hasta 2026-09-30 apuntaban a la carpeta vieja del repo y a un scratchpad borrado: fallaban siempre). ⚠ `test-boardfile.ps1` BORRA la asociación `.mboard` y la vuelve a registrar contra el exe de **Debug**: después de correrlo, repuntala al Release con "Asociar .mboard" o el doble click abre el binario equivocado. ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el **solo** (caso 5), la cuenta y el empuje del **volumen general** (caso 6) y su round-trip en el `.mboard` más el archivo VIEJO sin el campo que tiene que cargar en 100 y NO leerse como modificado (caso 7), el `.mboard` v2 de **varias pestañas** ida y vuelta (caso 8), el archivo viejo que abre como UNA pestaña con el nombre del archivo y SIN cambios (caso 9), renombrar / agregar / quitar pestañas como cambios mientras la pestaña activa no lo es (caso 10), y reordenarlas: orden persistido, misma activa, cambio que se deshace al volver, y la regla del arrastre sin rebote (caso 11); el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
+| `tools/` | Mantenimiento y pruebas. `make-ico.ps1` regenera el ícono desde el PNG. Los `test-*.ps1` son pruebas end-to-end de la app corriendo (archivo ausente, loop, arranque limpio, `.mboard`, multi-instancia, pantalla completa, precalentado de VLC, doble click para copiar el path, **cierre rápido** —`test-close.ps1`— , **pestañas** —`test-tabs.ps1`—, **reordenar pestañas** —`test-tab-reorder.ps1`, mouse real, sale **2** si el escritorio está en uso— **audio por sector** —`test-audio.ps1`, suena un tono bajo unos segundos— y **reemplazar el clip de un sector ocupado sin ventana suelta de VLC** —`test-replace.ps1`, bug 6— y el **loop ida y vuelta** —`test-pingpong.ps1`, necesita ffmpeg junto al exe—). `fetch-ffmpeg.ps1` baja el ffmpeg LGPL fijado a `third_party/ffmpeg/` (ver "Loop IDA Y VUELTA"); `PingPongProbe/` lo usa de verdad (duración, inversión, corte exacto, caché, cancelación) sin tocar VLC. `test-multi.ps1` y `test-boardfile.ps1` derivan el exe de `$PSScriptRoot` y generan su GIF de prueba en `%TEMP%` con ffmpeg (hasta 2026-09-30 apuntaban a la carpeta vieja del repo y a un scratchpad borrado: fallaban siempre). ⚠ `test-boardfile.ps1` BORRA la asociación `.mboard` y la vuelve a registrar contra el exe de **Debug**: después de correrlo, repuntala al Release con "Asociar .mboard" o el doble click abre el binario equivocado. ⚠ `test-doubleclick.ps1` necesita una sesion interactiva y DESBLOQUEADA —manda clicks reales y usa el portapapeles—: si no hay escritorio sale con codigo **2** ("no se pudo medir"), que no es ni verde ni rojo. `LoopProbe/`, `BoardProbe/` y `RestartProbe/` son proyectos que referencian el código real: el primero es el test de regresión del playhead, el segundo cubre el intercambio de media entre sectores, la persistencia del audio **y el round-trip del archivo ausente**, el reparto en partes iguales de `Distribute`, el **solo** (caso 5), la cuenta y el empuje del **volumen general** (caso 6) y su round-trip en el `.mboard` más el archivo VIEJO sin el campo que tiene que cargar en 100 y NO leerse como modificado (caso 7), el `.mboard` v2 de **varias pestañas** ida y vuelta (caso 8), el archivo viejo que abre como UNA pestaña con el nombre del archivo y SIN cambios (caso 9), renombrar / agregar / quitar pestañas como cambios mientras la pestaña activa no lo es (caso 10), y reordenarlas: orden persistido, misma activa, cambio que se deshace al volver, y la regla del arrastre sin rebote (caso 11), y el **ping-pong** puro: mapeo de tiempo, tope de 30 s, clave de caché y persistencia (casos 18–21); el tercero el reinicio del loop al terminar el clip (bug 5 — este SÍ toca VLC y un archivo de verdad). Salen con código 0/1. `WarmupProbe/` es la excepción: **NO es un test, es una MEDICIÓN** del arranque en frío de VLC etapa por etapa — no falla, informa. |
 | raíz | `App`, `MainWindow`, `DiagLog` (log de diagnóstico, solo con `AMPZ_DIAG_LOG`), `video-marketing.png` (fuente del ícono), `ampz-mediaboard.ico`. |
 
 ---

@@ -5,3 +5,5 @@ obj/
 *.suo
 ampz-crash.log
 installer/Output/
+# ffmpeg (134 MB) NO se commitea: lo baja tools/fetch-ffmpeg.ps1. Ver CLAUDE.md, "Loop ida y vuelta".
+third_party/

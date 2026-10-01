@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using AmpzMediaBoard.Board;
 using AmpzMediaBoard.Layout;
+using AmpzMediaBoard.Media;
 using AmpzMediaBoard.Persistence;
 
 // Pruebas de MODELO. Deliberadamente NO tocan VLC: los sectores se marcan como "archivo
@@ -34,6 +35,10 @@ internal static class Program
         V2SinPanelNoEsUnCambio();
         FijarYDesfijarSonCambios();
         SoloAlcanzaPestanaYPanel();
+        PingPongTraduceElTiempoAlOriginal();
+        PingPongZonaDemasiadoLargaSeRechaza();
+        PingPongClaveDeCache();
+        PingPongSeGuardaYViaja();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -659,6 +664,141 @@ internal static class Program
         dock.Board.SoloRequested += s => dock.Solo(s, activa);
         dock.Board.RequestSolo(enPanel);
         Check("RequestSolo desde el panel usa el alcance pestana + panel", !enPanel.IsMuted && t1.IsMuted && t2.IsMuted);
+    }
+
+    private static void PingPongTraduceElTiempoAlOriginal()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 18. PING-PONG: TIEMPO DEL GENERADO -> TIEMPO ORIGINAL ===");
+
+        // Zona A=2000, B=5000 (d=3000). Generado: ida [0,3000), vuelta [3000,6000), colchon despues.
+        const double a = 2000, b = 5000;
+        Check("t=0 es el marker A", PingPongMath.ToOriginal(0, a, b) == 2000);
+        Check("ida: t=1000 -> 3000", PingPongMath.ToOriginal(1000, a, b) == 3000);
+        Check("el giro: t=d es el marker B", PingPongMath.ToOriginal(3000, a, b) == 5000);
+        Check("vuelta: t=4000 -> 4000 (B - (t - d))", PingPongMath.ToOriginal(4000, a, b) == 4000);
+        Check("vuelta: t=5500 -> 2500", PingPongMath.ToOriginal(5500, a, b) == 2500);
+        Check("fin de la vuelta: t=2d vuelve a A", PingPongMath.ToOriginal(6000, a, b) == 2000);
+        Check("colchon: t=2d+300 -> A+300 (continua la ida)", PingPongMath.ToOriginal(6300, a, b) == 2300);
+        Check("nunca sale de la zona", PingPongMath.ToOriginal(99999, a, b) <= b && PingPongMath.ToOriginal(-5, a, b) == a);
+        Check("el loop del generado vuelve a 0 en 2d", PingPongMath.LoopEndMs(a, b) == 6000);
+
+        // Simetria: el mismo cuadro original aparece a t (ida) y a 2d - t (vuelta).
+        var simetrico = true;
+        for (var t = 0.0; t <= 3000; t += 250)
+            simetrico &= Math.Abs(PingPongMath.ToOriginal(t, a, b) - PingPongMath.ToOriginal(6000 - t, a, b)) < 0.001;
+        Check("ida y vuelta son espejo (t y 2d - t son el mismo cuadro)", simetrico);
+
+        Check("click en la timeline: original 3500 -> ida t=1500", PingPongMath.FromOriginal(3500, a, b) == 1500);
+        Check("click fuera de la zona se acota a la zona", PingPongMath.FromOriginal(100, a, b) == 0 && PingPongMath.FromOriginal(9000, a, b) == 3000);
+        Check("FromOriginal(ToOriginal(t)) == t sobre la ida",
+            PingPongMath.FromOriginal(PingPongMath.ToOriginal(1234, a, b), a, b) == 1234);
+    }
+
+    private static void PingPongZonaDemasiadoLargaSeRechaza()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 19. PING-PONG: ZONA > 30 s SE RECHAZA, ZONA EFECTIVA = LA DEL LOOP ===");
+
+        Check("30 s justos se aceptan", PingPongMath.Check(1000, 31000) == PingPongMath.ZoneCheck.Ok);
+        Check("30,001 s se rechazan", PingPongMath.Check(1000, 31001) == PingPongMath.ZoneCheck.TooLong);
+        Check("una zona de 5 s es valida", PingPongMath.Check(0, 5000) == PingPongMath.ZoneCheck.Ok);
+        Check("una zona de 50 ms es demasiado corta", PingPongMath.Check(0, 50) == PingPongMath.ZoneCheck.TooShort);
+        Check("NaN no pasa como valida", PingPongMath.Check(double.NaN, 5000) != PingPongMath.ZoneCheck.Ok);
+
+        // La zona efectiva es la MISMA regla que usa EnforceLoop: LoopEnd sin inicializar = clip entero.
+        Check("LoopEnd en 0 = hasta el final del clip", PingPongMath.EffectiveZone(0, 0, 60000) == (0, 60000));
+        Check("clip de 60 s con la zona por defecto se rechaza",
+            PingPongMath.Check(0, PingPongMath.EffectiveZone(0, 0, 60000).End) == PingPongMath.ZoneCheck.TooLong);
+        Check("B fuera del clip se acota a la duracion", PingPongMath.EffectiveZone(1000, 90000, 20000) == (1000, 20000));
+        Check("el colchon nunca es mas largo que la zona", PingPongMath.PadFor(150) == 150 && PingPongMath.PadFor(5000) == PingPongMath.PadMs);
+    }
+
+    private static void PingPongClaveDeCache()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 20. PING-PONG: CLAVE DEL CACHE Y ARGUMENTOS DE FFMPEG ===");
+
+        var fecha = new DateTime(2026, 9, 30, 12, 0, 0, DateTimeKind.Utc);
+        var k = PingPongMath.CacheKey(@"D:\clips\x.mp4", fecha, 2000, 5000);
+
+        Check("misma fuente, fecha y zona = misma clave", k == PingPongMath.CacheKey(@"D:\clips\x.mp4", fecha, 2000, 5000));
+        Check("la ruta no distingue mayusculas (Windows)", k == PingPongMath.CacheKey(@"d:\CLIPS\X.MP4", fecha, 2000, 5000));
+        Check("ruido de punto flotante en un marker NO regenera", k == PingPongMath.CacheKey(@"D:\clips\x.mp4", fecha, 2000.2, 4999.8));
+        Check("mover A 1 ms SI cambia la clave", k != PingPongMath.CacheKey(@"D:\clips\x.mp4", fecha, 2001, 5000));
+        Check("mover B SI cambia la clave", k != PingPongMath.CacheKey(@"D:\clips\x.mp4", fecha, 2000, 5100));
+        Check("re-exportar el clip (otra fecha) SI cambia la clave", k != PingPongMath.CacheKey(@"D:\clips\x.mp4", fecha.AddSeconds(1), 2000, 5000));
+        Check("otro archivo, otra clave", k != PingPongMath.CacheKey(@"D:\clips\y.mp4", fecha, 2000, 5000));
+        Check("la clave es un nombre de archivo seguro", k.Length == 32 && k.All(Uri.IsHexDigit));
+
+        // Los segundos de ffmpeg van con PUNTO aunque Windows este en espanol (coma decimal).
+        var antes = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("es-AR");
+        var args = PingPongMath.BuildArguments(@"D:\x.mp4", 12400, 15650, @"C:\t\o.mkv").ToList();
+        System.Globalization.CultureInfo.CurrentCulture = antes;
+        var ss = args[args.IndexOf("-ss") + 1];
+        var t = args[args.IndexOf("-t") + 1];
+        Check($"-ss con punto decimal ({ss})", ss == "12.400");
+        Check($"-t es la duracion de la zona ({t})", t == "3.250");
+        Check("-ss/-t van ANTES de -i (corte en la entrada)", args.IndexOf("-ss") < args.IndexOf("-i") && args.IndexOf("-t") < args.IndexOf("-i"));
+        Check("sin audio (-an)", args.Contains("-an"));
+        Check("codec intra-only (mjpeg)", args.Contains("mjpeg"));
+        Check("el filtro invierte la zona", args.Any(x => x.Contains("reverse")));
+    }
+
+    private static void PingPongSeGuardaYViaja()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 21. PING-PONG: SE GUARDA SOLO SI ESTA PRENDIDO, Y VIAJA CON EL CLIP ===");
+
+        var con = SectorCon(@"D:\clips\pp.mp4", 1000, 4000, 100, false);
+        con.PingPong = true;
+        var sin = SectorCon(@"D:\clips\normal.mp4", 0, 2000, 100, false);
+        LayoutNode raiz = new SplitNode(SplitOrientation.Horizontal, con, sin);
+
+        var texto = BoardStore.Serialize([new TabData("Board 1", raiz)]);
+        Check("el prendido se escribe (\"PingPong\": true)", texto.Contains("\"PingPong\": true"));
+        Check("el apagado NO se escribe (archivos viejos comparan igual)", !texto.Contains("\"PingPong\": false"));
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-pingpong.mboard");
+        BoardStore.SaveTo(archivo, [new TabData("Board 1", raiz)], 0);
+        var leido = BoardStore.LoadFrom(archivo);
+        if (leido?.Tabs[0].Root is SplitNode { First: SectorNode a, Second: SectorNode b })
+        {
+            Check("vuelve prendido (aunque el archivo este AUSENTE: no se pierde al guardar)", a.PingPong);
+            Check("el otro vuelve apagado", !b.PingPong);
+            Check("releido sin tocar NO es un cambio", BoardStore.MatchesFile(archivo, leido.Tabs));
+        }
+        else Check("la estructura leida es un split con dos sectores", false);
+
+        // Un archivo VIEJO (sin el campo) y uno con "PingPong": false escrito a mano son el mismo board.
+        var viejo = Path.Combine(Path.GetTempPath(), "probe-pingpong-viejo.mboard");
+        File.WriteAllText(viejo, """{ "Version": 2, "Tabs": [ { "Name": "B", "Root": { "Type": "sector", "Path": "D:\\clips\\v.mp4", "LoopStart": 0, "LoopEnd": 900, "PingPong": false } } ] }""");
+        var leidoViejo = BoardStore.LoadFrom(viejo);
+        Check("\"PingPong\": false carga apagado", leidoViejo?.Tabs[0].Root is SectorNode { PingPong: false });
+        Check("y NO se lee como modificado", leidoViejo is not null && BoardStore.MatchesFile(viejo, leidoViejo.Tabs));
+
+        // Intercambiar y fijar viajan por MediaSnapshot: el toggle va con su clip.
+        var vm = new BoardViewModel();
+        vm.ReplaceRoot(raiz);
+        vm.SwapMedia(con, sin);
+        Check("intercambiar: el destino recibe el ping-pong", sin.PingPong && sin.MissingPath == @"D:\clips\pp.mp4");
+        Check("intercambiar: el origen recibe el apagado", !con.PingPong);
+
+        var dock = new PinnedDock();
+        var fijado = dock.Pin(vm, sin)!;
+        Check("fijar: el ping-pong viaja al panel", fijado.PingPong);
+
+        // Prenderlo prende el LOOP; apagar el LOOP lo apaga (es un modo del loop, no otra cosa).
+        var s = SectorCon(@"D:\clips\l.mp4", 0, 1000, 100, false);
+        s.LoopEnabled = false;
+        s.PingPong = true;
+        Check("prender ping-pong prende el LOOP", s.LoopEnabled);
+        s.LoopEnabled = false;
+        Check("apagar el LOOP apaga el ping-pong", !s.PingPong);
+
+        File.Delete(archivo);
+        File.Delete(viejo);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

@@ -19,6 +19,14 @@ if (-not $iscc) {
     Write-Error 'No se encontro ISCC.exe. Instalalo con: winget install JRSoftware.InnoSetup --scope user'
 }
 
+# ffmpeg (loop ida y vuelta) NO esta en el repo: se baja FIJADO y verificado por SHA256. Sin el,
+# el publish saldria sin la feature (el .csproj lo copia solo si existe) y el .iss no compila.
+$ffmpeg = Join-Path $root 'third_party\ffmpeg\ffmpeg.exe'
+if (-not (Test-Path $ffmpeg)) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'fetch-ffmpeg.ps1')
+    if ($LASTEXITCODE -ne 0) { Write-Error 'No se pudo bajar ffmpeg (tools/fetch-ffmpeg.ps1).' }
+}
+
 # El exe abierto bloquea el publish (MSB3027): cerrar antes de pisarlo.
 Stop-Process -Name AmpzMediaBoard -Force -ErrorAction SilentlyContinue
 

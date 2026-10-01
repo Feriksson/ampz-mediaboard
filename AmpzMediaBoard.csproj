@@ -22,7 +22,7 @@
     <AssemblyTitle>Ampz MediaBoard</AssemblyTitle>
     <Product>Ampz MediaBoard</Product>
     <RootNamespace>AmpzMediaBoard</RootNamespace>
-    <Version>1.7.0</Version>
+    <Version>1.8.0</Version>
   </PropertyGroup>
 
   <!-- Perfil de RELEASE. Lo que NO está acá también es una decisión:
@@ -56,6 +56,24 @@
     <Page Remove="tools\**" />
     <None Remove="tools\**" />
     <Resource Remove="tools\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- third_party/ tiene binarios bajados (ffmpeg): el globbing por defecto del SDK los metería
+         como None sin copiar, y encima duplicados con los de abajo. -->
+    <None Remove="third_party\**" />
+  </ItemGroup>
+
+  <!-- ══ ffmpeg para el loop ida y vuelta (ping-pong) ══
+       Lo baja tools/fetch-ffmpeg.ps1 a third_party/ffmpeg/ (build LGPL fijado, NUNCA commiteado)
+       y se copia al output como ffmpeg\ffmpeg.exe con su LICENSE y su NOTICE (la LGPL pide que
+       viajen juntos). ⚠ Condicional A PROPÓSITO: sin la carpeta el build compila igual y la
+       feature se deshabilita sola con su explicación (PingPongRenderer.IsAvailable). Un clon
+       recién hecho no puede dejar de compilar por un binario opcional de 134 MB. -->
+  <ItemGroup Condition="Exists('third_party\ffmpeg\ffmpeg.exe')">
+    <None Include="third_party\ffmpeg\ffmpeg.exe" Link="ffmpeg\ffmpeg.exe" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="third_party\ffmpeg\LICENSE.txt" Link="ffmpeg\LICENSE.txt" CopyToOutputDirectory="PreserveNewest" Condition="Exists('third_party\ffmpeg\LICENSE.txt')" />
+    <None Include="third_party\ffmpeg\NOTICE.txt" Link="ffmpeg\NOTICE.txt" CopyToOutputDirectory="PreserveNewest" Condition="Exists('third_party\ffmpeg\NOTICE.txt')" />
   </ItemGroup>
 
   <ItemGroup>
