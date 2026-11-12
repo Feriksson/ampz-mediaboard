@@ -35,6 +35,11 @@ public partial class MainWindow : Window
     /// <summary>La vista del panel: UNA sola, creada con la ventana, hermana de BoardHost.</summary>
     private readonly BoardView _dockView;
 
+    /// <summary>"Correr todo una vez": coordina la largada sincronizada. Ver Board/RunOnce.</summary>
+    private readonly RunOnce _runOnce = new();
+
+    private void RunAllOnce() => _runOnce.Start(RunOnce.Scope(Board, _dock.Board));
+
     /// <summary>
     /// El sector seleccionado de TODA la app: el del panel o el de la pestaña activa. Hay uno
     /// solo (ver <see cref="OnBoardSelectionChanged"/>), así Espacio, A/B, L y Ctrl+V saben a
@@ -109,6 +114,7 @@ public partial class MainWindow : Window
         SaveButton.Click += (_, _) => Save();
         SaveAsButton.Click += (_, _) => SaveAs();
         DistributeButton.Click += (_, _) => Board.Distribute();
+        RunOnceButton.Click += (_, _) => RunAllOnce();
         AssociateButton.Click += (_, _) => Associate();
 
         // La tira desborda desplazándose: la rueda del mouse la mueve en horizontal (la barra
@@ -1264,6 +1270,13 @@ public partial class MainWindow : Window
                 // board recién abierto puede no tener ninguna celda activa.
                 case Key.E:
                     Board.Distribute();
+                    e.Handled = true;
+                    return;
+
+                // Correr todo una vez: también es de TODO lo visible (pestaña + panel), no del
+                // sector seleccionado — por eso va antes del guard, como Distribuir.
+                case Key.R:
+                    RunAllOnce();
                     e.Handled = true;
                     return;
             }

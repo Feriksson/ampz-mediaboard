@@ -40,6 +40,7 @@ internal static class Program
         PingPongClaveDeCache();
         PingPongSeGuardaYViaja();
         ExpandirColapsaElCaminoYCongelaLosTapados();
+        CorrerUnaVezEsDeTiempoDeEjecucion();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -851,6 +852,63 @@ internal static class Program
         var unico = new BoardViewModel();
         unico.Expand(unico.AllSectors.Single());
         Check("un board de un solo sector no se expande", unico.Expanded is null);
+    }
+
+    private static void CorrerUnaVezEsDeTiempoDeEjecucion()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 23. CORRER TODO UNA VEZ: SOLO VIDEO VISIBLE, PESTANA + PANEL, SIN CAMBIOS SIN GUARDAR ===");
+
+        Check("video con player corre", RunOnce.IsTarget(MediaKind.Video, hasPlayer: true, frozen: false));
+        Check("imagen NO corre", !RunOnce.IsTarget(MediaKind.Image, true, false));
+        Check("vacio NO corre", !RunOnce.IsTarget(MediaKind.None, false, false));
+        Check("video sin player (ausente) NO corre", !RunOnce.IsTarget(MediaKind.Video, false, false));
+        Check("video congelado (tapado por expandir) NO corre", !RunOnce.IsTarget(MediaKind.Video, true, true));
+
+        var t1 = SectorCon(@"D:\clips\r1.mp4", 1000, 3000, 100, false);
+        var t2 = SectorCon(@"D:\clips\r2.mp4", 0, 0, 100, false);
+        var fijar = SectorCon(@"D:\clips\rp.mp4", 0, 2000, 100, false);
+        var activa = new BoardViewModel();
+        activa.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal, t1, new SplitNode(SplitOrientation.Vertical, t2, fijar)));
+        var fondo = SectorCon(@"D:\clips\rf.mp4", 0, 100, 100, false);
+        var deFondo = new BoardViewModel();
+        deFondo.ReplaceRoot(fondo);
+        var dock = new PinnedDock();
+        var enPanel = dock.Pin(activa, fijar)!;
+
+        var alcance = RunOnce.Scope(activa, dock.Board).ToList();
+        Check("el alcance trae la pestana activa", alcance.Contains(t1) && alcance.Contains(t2));
+        Check("y el panel fijado", alcance.Contains(enPanel));
+        Check("y NO la pestana de fondo", !alcance.Contains(fondo));
+        Check("ausentes (sin player) quedan fuera de los objetivos", RunOnce.Targets(alcance).Count == 0);
+
+        // Guardado, y despues se arranca la corrida en todos: el documento NO cambia.
+        var tabs = new List<TabData> { new("Board 1", activa.Root) };
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-runonce.mboard");
+        BoardStore.SaveTo(archivo, tabs, 0, dock.ToData());
+        foreach (var s in alcance) s.BeginRunOnce();
+        Check("la corrida queda en curso", alcance.All(s => s.IsRunningOnce));
+        Check("NO toca LOOP ni ping-pong", alcance.All(s => s.LoopEnabled && !s.PingPong));
+        Check("NO toca los markers", t1.LoopStartMs == 1000 && t1.LoopEndMs == 3000);
+        Check("MatchesFile sigue true (sin \u2022)", BoardStore.MatchesFile(archivo, tabs, dock.ToData()));
+
+        // Cualquier accion del usuario sobre el sector la cancela para ESE sector.
+        t1.LoopStartMs = 1500;
+        Check("mover un marker cancela", !t1.IsRunningOnce && t2.IsRunningOnce);
+        t2.SeekTo(500);
+        Check("buscar en la timeline cancela", !t2.IsRunningOnce);
+        enPanel.TogglePlay();
+        Check("play/pausa cancela", !enPanel.IsRunningOnce);
+        t1.BeginRunOnce();
+        t1.LoopEnabled = false;
+        Check("LOOP cancela", !t1.IsRunningOnce);
+        t1.BeginRunOnce();
+        t1.BeginRunOnce();
+        Check("arrancar de nuevo reinicia (sigue en curso)", t1.IsRunningOnce);
+        t1.Unload();
+        Check("vaciar el sector cancela", !t1.IsRunningOnce);
+
+        File.Delete(archivo);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

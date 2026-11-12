@@ -45,6 +45,20 @@
                     <Button x:Name="DistributeButton" Content="Distribuir" Style="{StaticResource ToolbarButton}"
                             ToolTip="Ctrl+E — reparte el espacio en partes iguales entre todos los sectores" />
 
+                    <!-- ══ Correr todo una vez ══
+                         Para comparar videos casi idénticos: cada sector con video corre su zona
+                         A→B UNA vez, todos arrancando juntos, y queda pausado en B. Ver Board/RunOnce.
+                         ⚠ ▶ (U+25B6) VERIFICADO con GlyphTypeface: existe en "Segoe UI Symbol" y NO
+                         en "Segoe UI" (la fuente del botón): va en su propio Run para no salir TOFU. -->
+                    <Button x:Name="RunOnceButton" Style="{StaticResource ToolbarButton}"
+                            AutomationProperties.AutomationId="RunOnceButton"
+                            AutomationProperties.Name="Correr todo una vez"
+                            ToolTip="Ctrl+R — cada video corre su zona A→B una vez, todos juntos, y queda pausado en B">
+                        <TextBlock>
+                            <Run Text="&#x25B6;" FontFamily="Segoe UI Symbol" /><Run Text=" Correr todo una vez" />
+                        </TextBlock>
+                    </Button>
+
                     <Border Width="1" Background="#2E2E3A" Margin="8,2,8,2" />
 
                     <!-- ══ Volumen general del board ══
@@ -76,7 +90,7 @@
                             Style="{StaticResource ToolbarButton}" Visibility="Collapsed"
                             ToolTip="Hace que los archivos .mboard se abran con esta app al doble click" />
                     <TextBlock Foreground="#5A5A6B" FontSize="10" VerticalAlignment="Center"
-                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead  ·  Ctrl+T / Ctrl+W = pestañas  ·  doble click = renombrar  ·  F11 = pantalla completa" />
+                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead  ·  Ctrl+T / Ctrl+W = pestañas  ·  doble click = renombrar  ·  F = expandir  ·  Ctrl+R = correr todo una vez  ·  F11 = pantalla completa" />
                     <Border Width="1" Background="#2E2E3A" Margin="12,1,10,1" />
                     <!-- El texto lo pone ShowVersion() leyendo el assembly. NO se escribe acá:
                          la única fuente de verdad es <Version> en el .csproj. -->
