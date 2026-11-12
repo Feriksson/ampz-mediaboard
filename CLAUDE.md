@@ -189,6 +189,36 @@ ffmpeg -ss A -t d -i <src> -an -sn -dn -filter_complex
 - Regresión: `BoardProbe` 18–21 (puro), `tools/PingPongProbe` (ffmpeg real), `tools/test-pingpong.ps1`
   (app real; detecta con `WindowFromPoint` si otra ventana tapa el board y deja ese paso sin medir).
 
+### Expandir un sector (⤢ o `F`; `Esc` restaura)
+
+`BoardViewModel.Expanded` (runtime, NO se persiste) + `BoardView.ApplyExpand`.
+- ⚠ **Sin re-parentar el VideoView** (= re-montar): se sube por `SplitNode.PathToRoot` y en cada split
+  el lado del sector va a 1*, el otro y el splitter a 0 + `Collapsed`. Restaurar = `WriteRatios` +
+  Visible. ⚠ **Nunca escribir `split.Ratio`** (marcaría "•") ni pasar por `LayoutChanged`.
+- Los tapados se congelan (`Freeze` + `SetFrozen`, como el arrastre); `EndInteractiveResize` y
+  `SetSectorsFrozen(false)` los **saltean** (el divisor del panel descongela todo el board).
+- Se suelta en Split/Close/ReplaceRoot/SwapMedia/Distribute (con Thaw) y en `Suspend` (sin Thaw: el
+  Freeze de la suspensión conserva el `_resumeAfterThaw`). Funciona igual en el panel (su BoardView).
+- `Esc` sale primero de la expansión (pestaña y panel), el siguiente de pantalla completa.
+- Regresión: `BoardProbe` 22. El colapso visual y el airspace NO tienen prueba automática.
+
+### Correr todo una vez (barra o `Ctrl+R`) — `Board/RunOnce.cs`
+
+Cada video de la pestaña activa + panel corre A→B UNA vez, todos juntos, y queda pausado en B.
+- ⚠ **Override de runtime** (`SectorNode._runOnce`): no toca `LoopEnabled`/`PingPong`/markers, no
+  viaja en `MediaSnapshot`, no cambia `MatchesFile`. Usa A→B aunque el LOOP esté apagado.
+- ⚠ **Dos fases, no RestartFrom en fila** (cada uno reabre el archivo: cientos de ms de desfase):
+  `BeginRunOnce` pausa y busca A (RestartFrom solo si Ended/Stopped; Opening espera a Playing para
+  pausar); `PollRunOnceReady` cada 15 ms; cuando todos listos o a los 1,5 s, `GoRunOnce` sobre todos
+  en la misma vuelta del Dispatcher (solo `SetPause(false)` + `Reanchor`).
+- Fin: `EnforceLoop` pausa en B (con `TailGuardMs`, así B = final no cae en Ended/negro); sin relanzar.
+  En ping-pong corre solo la ida `[0, d)` del generado (sin re-montar).
+- Cancelan (por sector): play/pausa, seek, LOOP, markers (no la zona por defecto del Tick:
+  `_settingDefaultZone`), ping-pong, Unload, `SwitchPlayback`. Apretar de nuevo reinicia.
+- Fuera: imágenes, vacíos, ausentes, congelados (tapados por expandir). Un clip **pendiente** arranca
+  en A cuando la vista lo dispare, sin sincronía (bugs 1 y 6).
+- Regresión: `BoardProbe` 23 (puro). La sincronía real con VLC NO tiene prueba automática.
+
 ### ⚠ Nunca asignes valor local a una DP con binding OneWay
 
 Destruye el binding para siempre (bug: playhead clavado tras el primer click). `LoopTimeline` no es
@@ -385,6 +415,7 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 | `Espacio` | Play/pausa del sector seleccionado |
 | `A` / `B` | Marker de inicio / fin en el playhead |
 | `L` | Prender/apagar loop |
+| `F` | Expandir / restaurar el sector seleccionado (también ⤢); `Esc` restaura |
 | `P` | Loop ida y vuelta (también ⇄) |
 | `Ctrl+T` / `Ctrl+W` | Agregar / quitar pestaña (sin preguntar). También `+`, ×, click del medio |
 | doble click en pestaña | Renombrar (Enter / click afuera confirma, Esc cancela) |
@@ -397,7 +428,8 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 | `Ctrl+V` | Cargar el archivo del portapapeles en el sector seleccionado |
 | doble click en sector | Copiar el path |
 | `Ctrl+E` | Distribuir |
-| `F11` / `Esc` | Pantalla completa / salir |
+| `Ctrl+R` | Correr todo una vez (pestaña activa + panel) |
+| `F11` / `Esc` | Pantalla completa / salir (`Esc` sale antes de una expansión) |
 
 - Atajos en `PreviewKeyDown` (en `KeyDown` un botón enfocado se come el Espacio).
 - **Pantalla completa**: guarda y restaura `WindowStyle`/`WindowState`/`ResizeMode`. ⚠ `Normal` antes de
@@ -421,7 +453,7 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 | Carpeta | Contenido |
 |---|---|
 | `Layout/` | `LayoutNode`, `SplitNode`, `SectorNode` |
-| `Board/` | `BoardViewModel`, `BoardView`, `BoardTab`, `TabOrder`, `PinnedDock` |
+| `Board/` | `BoardViewModel`, `BoardView`, `BoardTab`, `TabOrder`, `PinnedDock`, `RunOnce` |
 | `Media/` | `VlcEngine`, `MediaKind`, `PingPongMath`, `PingPongRenderer` |
 | `Controls/` | `SectorView` (capa de render), `LoopTimeline` |
 | `Persistence/` | `AppPaths`, `BoardStore`, `BoardFile` |
@@ -430,7 +462,7 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 
 **Pruebas** (`tools/`):
 - Sondas `dotnet run`, salen 0/1: `LoopProbe` (binding del playhead), `BoardProbe` (swap, persistencia,
-  ausente, distribuir, solo, master, pestañas, reorden, panel, ping-pong puro), `RestartProbe` (reinicio
+  ausente, distribuir, solo, master, pestañas, reorden, panel, ping-pong puro, expandir, correr una vez), `RestartProbe` (reinicio
   del loop, toca VLC), `PingPongProbe` (ffmpeg real). `WarmupProbe` **mide**, no testea.
 - `test-*.ps1` contra la app corriendo: missing, loop, restart, close, tabs, tab-reorder, dock, audio,
   replace, pingpong, warmup, fullscreen, doubleclick, multi, boardfile. Código **2** = no se pudo medir
