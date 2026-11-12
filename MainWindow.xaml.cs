@@ -1274,6 +1274,14 @@ public partial class MainWindow : Window
         // tener ninguno: colgarla del guard haría que el atajo funcione día por medio.
         switch (e.Key)
         {
+            // Esc sale PRIMERO de la expansión (la pestaña activa y/o el panel); recién el Esc
+            // siguiente sale de pantalla completa. Va antes que el de pantalla completa por eso.
+            case Key.Escape when Board.Expanded is not null || _dock.Board.Expanded is not null:
+                Board.CollapseExpand();
+                _dock.Board.CollapseExpand();
+                e.Handled = true;
+                return;
+
             case Key.F11:
                 TogglePantallaCompleta();
                 e.Handled = true;
@@ -1307,6 +1315,13 @@ public partial class MainWindow : Window
 
             case Key.B when sector.DurationMs > 0:
                 sector.LoopEndMs = Math.Max(sector.PositionMs, sector.LoopStartMs + 120);
+                e.Handled = true;
+                break;
+
+            // F = expandir / restaurar el sector seleccionado, en el board donde vive (pestaña o
+            // panel: cada uno expande dentro de su propia vista).
+            case Key.F:
+                (ReferenceEquals(_dock.Board.Selected, sector) ? _dock.Board : Board).ToggleExpand(sector);
                 e.Handled = true;
                 break;
 

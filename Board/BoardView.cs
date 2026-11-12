@@ -26,12 +26,67 @@ public sealed class BoardView : ContentControl
     /// </summary>
     private readonly Dictionary<SplitNode, Grid> _grids = new();
 
+    private const double SplitterSize = 6;
+
     public BoardView(BoardViewModel board)
     {
         _board = board;
         _board.LayoutChanged += Rebuild;
         _board.RatiosChanged += ApplyRatios;
+        _board.PropertyChanged += OnBoardPropertyChanged;
         Rebuild();
+    }
+
+    private void OnBoardPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(BoardViewModel.Expanded)) ApplyExpand();
+    }
+
+    /// <summary>
+    /// Materializa <see cref="BoardViewModel.Expanded"/> SIN reconstruir nada.
+    ///
+    /// ⚠ No se re-parenta el VideoView del expandido (re-parentar = re-montar, bug #4): se sube
+    /// por los splits de su camino a la raíz y en cada uno el lado del sector pasa a 1*, y el otro
+    /// lado y el splitter a 0 + Collapsed. Restaurar = reescribir las GridLength desde los Ratio
+    /// (que NUNCA se tocaron: tocar Ratio marcaría el documento como modificado) y devolver
+    /// Visible a todo.
+    ///
+    /// Los tapados además se congelan en la vista (SetFrozen): colapsar el ancestro esconde el
+    /// HWND, pero la ventana de overlay de LibVLCSharp necesita el mismo camino probado que el
+    /// arrastre y la pestaña de fondo. El congelado del NODO lo hace BoardViewModel.Expand.
+    /// </summary>
+    private void ApplyExpand()
+    {
+        WriteRatios();
+        foreach (var grid in _grids.Values)
+            foreach (UIElement child in grid.Children)
+                child.Visibility = Visibility.Visible;
+
+        if (_board.Expanded is { } expanded)
+        {
+            foreach (var (split, keepFirst) in SplitNode.PathToRoot(expanded))
+            {
+                if (!_grids.TryGetValue(split, out var grid)) continue;
+                var keep = keepFirst ? 0 : 2;
+                var horizontal = split.Orientation == SplitOrientation.Horizontal;
+
+                for (var i = 0; i < 3; i++)
+                {
+                    var len = i == keep ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+                    if (horizontal) grid.ColumnDefinitions[i].Width = len;
+                    else grid.RowDefinitions[i].Height = len;
+                }
+
+                foreach (UIElement child in grid.Children)
+                {
+                    var index = horizontal ? Grid.GetColumn(child) : Grid.GetRow(child);
+                    if (index != keep) child.Visibility = Visibility.Collapsed;
+                }
+            }
+        }
+
+        foreach (var view in FindSectorViews(Content as DependencyObject))
+            view.SetFrozen(_suspended || (view.DataContext is SectorNode node && _board.IsHiddenByExpand(node)));
     }
 
     /// <summary>
@@ -78,6 +133,10 @@ public sealed class BoardView : ContentControl
         // Una vista de segundo plano que se reconstruye (se abrió un board en una pestaña que
         // todavía no se mostró) nace con sus sectores congelados, igual que los que reemplaza.
         if (_suspended) SetSectorsFrozen(true);
+
+        // Red de seguridad: el modelo suelta la expansión antes de cambiar la forma del árbol,
+        // pero si alguna ruta llegara acá con un expandido vivo, los Grid nuevos lo respetan.
+        if (_board.Expanded is not null) ApplyExpand();
     }
 
     private UIElement Build(LayoutNode node) => node switch
@@ -96,7 +155,6 @@ public sealed class BoardView : ContentControl
         // guardan la PROPORCIÓN, así el layout se adapta solo a cualquier tamaño de ventana.
         var firstLen = new GridLength(split.Ratio, GridUnitType.Star);
         var secondLen = new GridLength(1 - split.Ratio, GridUnitType.Star);
-        const double SplitterSize = 6;
 
         var splitter = new GridSplitter
         {
@@ -187,6 +245,13 @@ public sealed class BoardView : ContentControl
     /// </summary>
     private void ApplyRatios()
     {
+        WriteRatios();
+        if (_board.Expanded is not null) ApplyExpand();
+    }
+
+    /// <summary>Las GridLength desde los Ratio del modelo, tal cual (sin mirar la expansión).</summary>
+    private void WriteRatios()
+    {
         foreach (var (split, grid) in _grids)
         {
             var first = new GridLength(split.Ratio, GridUnitType.Star);
@@ -202,14 +267,23 @@ public sealed class BoardView : ContentControl
                 grid.RowDefinitions[0].Height = first;
                 grid.RowDefinitions[2].Height = second;
             }
+
+            // El splitter vuelve a su ancho fijo: la expansión lo pudo haber dejado en 0.
+            if (split.Orientation == SplitOrientation.Horizontal) grid.ColumnDefinitions[1].Width = new GridLength(SplitterSize);
+            else grid.RowDefinitions[1].Height = new GridLength(SplitterSize);
         }
     }
 
     /// <summary>Esconde (o devuelve) la superficie de video de todos los sectores del board.</summary>
     private void SetSectorsFrozen(bool frozen)
     {
+        // ⚠ Descongelar NO alcanza a los tapados por la expansión: su video tiene que seguir
+        // escondido (ver ApplyExpand). Congelar sí alcanza a todos (es idempotente).
         foreach (var view in FindSectorViews(Content as DependencyObject))
+        {
+            if (!frozen && view.DataContext is SectorNode node && _board.IsHiddenByExpand(node)) continue;
             view.SetFrozen(frozen);
+        }
     }
 
     /// <summary>
@@ -270,6 +344,7 @@ public sealed class BoardView : ContentControl
     {
         _board.LayoutChanged -= Rebuild;
         _board.RatiosChanged -= ApplyRatios;
+        _board.PropertyChanged -= OnBoardPropertyChanged;
         foreach (var view in FindSectorViews(Content as DependencyObject))
             view.Detach();
         Content = null;

@@ -39,6 +39,7 @@ internal static class Program
         PingPongZonaDemasiadoLargaSeRechaza();
         PingPongClaveDeCache();
         PingPongSeGuardaYViaja();
+        ExpandirColapsaElCaminoYCongelaLosTapados();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -799,6 +800,57 @@ internal static class Program
 
         File.Delete(archivo);
         File.Delete(viejo);
+    }
+
+    private static void ExpandirColapsaElCaminoYCongelaLosTapados()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 22. EXPANDIR: COLAPSA EL OTRO LADO DE CADA SPLIT DEL CAMINO, CONGELA LOS TAPADOS ===");
+
+        // A | (B / C): expandir C conserva Second en la raiz y Second en el split interno.
+        var a = SectorCon(@"D:\clips.mp4", 0, 100, 100, false);
+        var b = SectorCon(@"D:\clips.mp4", 0, 100, 100, false);
+        var c = SectorCon(@"D:\clips\c.mp4", 0, 100, 100, false);
+        var interno = new SplitNode(SplitOrientation.Vertical, b, c, 0.3);
+        var raiz = new SplitNode(SplitOrientation.Horizontal, a, interno, 0.7);
+        var camino = SplitNode.PathToRoot(c).ToList();
+        Check("el camino de C son 2 splits, de abajo hacia arriba",
+            camino.Count == 2 && ReferenceEquals(camino[0].Split, interno) && ReferenceEquals(camino[1].Split, raiz));
+        Check("en cada split C esta del lado Second (se colapsa First)", !camino[0].KeepFirst && !camino[1].KeepFirst);
+        var caminoB = SplitNode.PathToRoot(b).ToList();
+        Check("B: First en el interno, Second en la raiz", caminoB[0].KeepFirst && !caminoB[1].KeepFirst);
+        Check("A: un solo split, conserva First", SplitNode.PathToRoot(a).Single().KeepFirst);
+        Check("la raiz no tiene camino", !SplitNode.PathToRoot(raiz).Any());
+
+        var vm = new BoardViewModel();
+        vm.ReplaceRoot(raiz);
+        var antes = BoardStore.Serialize([new TabData("Board 1", vm.Root)]);
+        vm.ToggleExpand(c);
+        Check("C queda expandido y seleccionado", ReferenceEquals(vm.Expanded, c) && ReferenceEquals(vm.Selected, c));
+        Check("los tapados se congelan, el expandido no", a.IsFrozen && b.IsFrozen && !c.IsFrozen);
+        Check("expandir NO toca ningun Ratio (no marca cambios)", raiz.Ratio == 0.7 && interno.Ratio == 0.3);
+        Check("expandir NO cambia el documento serializado",
+            BoardStore.Serialize([new TabData("Board 1", vm.Root)]) == antes);
+
+        vm.EndInteractiveResize();   // el divisor del panel descongela el board entero...
+        Check("...pero los tapados SIGUEN congelados", a.IsFrozen && b.IsFrozen);
+
+        vm.ToggleExpand(c);
+        Check("F de nuevo restaura y descongela", vm.Expanded is null && !a.IsFrozen && !b.IsFrozen);
+
+        vm.Expand(b);
+        vm.Split(a, SplitOrientation.Vertical);
+        Check("partir suelta la expansion (y descongela)", vm.Expanded is null && !b.IsFrozen && !c.IsFrozen);
+
+        vm.Expand(c);
+        vm.Suspend();
+        Check("cambiar de pestana suelta la expansion", vm.Expanded is null);
+        vm.Resume();
+        Check("y al volver nadie queda congelado", vm.AllSectors.All(s => !s.IsFrozen));
+
+        var unico = new BoardViewModel();
+        unico.Expand(unico.AllSectors.Single());
+        Check("un board de un solo sector no se expande", unico.Expanded is null);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>
