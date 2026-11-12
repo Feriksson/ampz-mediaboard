@@ -45,6 +45,20 @@
                     <Button x:Name="DistributeButton" Content="Distribuir" Style="{StaticResource ToolbarButton}"
                             ToolTip="Ctrl+E — reparte el espacio en partes iguales entre todos los sectores" />
 
+                    <!-- ══ Correr todo una vez ══
+                         Para comparar videos casi idénticos: cada sector con video corre su zona
+                         A→B UNA vez, todos arrancando juntos, y queda pausado en B. Ver Board/RunOnce.
+                         ⚠ ▶ (U+25B6) VERIFICADO con GlyphTypeface: existe en "Segoe UI Symbol" y NO
+                         en "Segoe UI" (la fuente del botón): va en su propio Run para no salir TOFU. -->
+                    <Button x:Name="RunOnceButton" Style="{StaticResource ToolbarButton}"
+                            AutomationProperties.AutomationId="RunOnceButton"
+                            AutomationProperties.Name="Correr todo una vez"
+                            ToolTip="Ctrl+R — cada video corre su zona A→B una vez, todos juntos, y queda pausado en B">
+                        <TextBlock>
+                            <Run Text="&#x25B6;" FontFamily="Segoe UI Symbol" /><Run Text=" Correr todo una vez" />
+                        </TextBlock>
+                    </Button>
+
                     <Border Width="1" Background="#2E2E3A" Margin="8,2,8,2" />
 
                     <!-- ══ Volumen general del board ══
@@ -75,8 +89,58 @@
                     <Button x:Name="AssociateButton" Content="Asociar .mboard"
                             Style="{StaticResource ToolbarButton}" Visibility="Collapsed"
                             ToolTip="Hace que los archivos .mboard se abran con esta app al doble click" />
-                    <TextBlock Foreground="#5A5A6B" FontSize="10" VerticalAlignment="Center"
-                               Text="Espacio = play/pausa  ·  A / B = markers de loop en el playhead  ·  Ctrl+T / Ctrl+W = pestañas  ·  doble click = renombrar  ·  F11 = pantalla completa" />
+                    <!-- ══ Ayuda de atajos ══
+                         Antes era una línea de texto fija en la barra: con la ventana angosta se
+                         encimaba con los botones de la izquierda (las dos StackPanel comparten la
+                         misma celda). Ahora vive en un Popup que abre "?" o F1.
+                         ⚠ Popup y no un overlay dentro del Grid: el Popup es una ventana propia,
+                         así que queda ENCIMA de los VideoView (HWND); un Border común quedaría
+                         tapado por el video (airspace).
+                         ⚠ IsHitTestVisible=False mientras está abierto: con StaysOpen=False, el
+                         click en el botón cierra el Popup y el mismo click lo volvería a abrir. -->
+                    <ToggleButton x:Name="HelpToggle" Content="?" Width="24" Margin="0,0,0,0"
+                                  FontSize="12" ToolTip="Atajos de teclado (F1)"
+                                  AutomationProperties.Name="Atajos de teclado"
+                                  IsChecked="{Binding IsOpen, ElementName=HelpPopup, Mode=TwoWay}">
+                        <ToggleButton.Style>
+                            <Style TargetType="ToggleButton" BasedOn="{StaticResource LoopToggle}">
+                                <Style.Triggers>
+                                    <Trigger Property="IsChecked" Value="True">
+                                        <Setter Property="IsHitTestVisible" Value="False" />
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ToggleButton.Style>
+                    </ToggleButton>
+                    <Popup x:Name="HelpPopup" PlacementTarget="{Binding ElementName=HelpToggle}"
+                           Placement="Bottom" HorizontalOffset="-300" VerticalOffset="6"
+                           StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade">
+                        <Border Background="#1F1F28" BorderBrush="{StaticResource HintBorderBrush}"
+                                BorderThickness="1" CornerRadius="6" Padding="14,10" Width="324">
+                            <StackPanel>
+                                <TextBlock Text="Atajos de teclado" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{StaticResource TextBrush}" Margin="0,0,0,8" />
+                                <!-- La lista la llena MainWindow (ShortcutHelp): un solo lugar
+                                     para mantenerla al lado del PreviewKeyDown que la implementa. -->
+                                <ItemsControl x:Name="HelpList" Focusable="False">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="0,2">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="120" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding Key}" FontFamily="Consolas" FontSize="11"
+                                                           Foreground="{StaticResource AccentBrush}" />
+                                                <TextBlock Grid.Column="1" Text="{Binding Value}" FontSize="11"
+                                                           TextWrapping="Wrap" Foreground="{StaticResource DimTextBrush}" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Border>
+                    </Popup>
                     <Border Width="1" Background="#2E2E3A" Margin="12,1,10,1" />
                     <!-- El texto lo pone ShowVersion() leyendo el assembly. NO se escribe acá:
                          la única fuente de verdad es <Version> en el .csproj. -->

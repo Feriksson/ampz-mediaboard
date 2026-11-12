@@ -39,6 +39,8 @@ internal static class Program
         PingPongZonaDemasiadoLargaSeRechaza();
         PingPongClaveDeCache();
         PingPongSeGuardaYViaja();
+        ExpandirColapsaElCaminoYCongelaLosTapados();
+        CorrerUnaVezEsDeTiempoDeEjecucion();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -799,6 +801,114 @@ internal static class Program
 
         File.Delete(archivo);
         File.Delete(viejo);
+    }
+
+    private static void ExpandirColapsaElCaminoYCongelaLosTapados()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 22. EXPANDIR: COLAPSA EL OTRO LADO DE CADA SPLIT DEL CAMINO, CONGELA LOS TAPADOS ===");
+
+        // A | (B / C): expandir C conserva Second en la raiz y Second en el split interno.
+        var a = SectorCon(@"D:\clips.mp4", 0, 100, 100, false);
+        var b = SectorCon(@"D:\clips.mp4", 0, 100, 100, false);
+        var c = SectorCon(@"D:\clips\c.mp4", 0, 100, 100, false);
+        var interno = new SplitNode(SplitOrientation.Vertical, b, c, 0.3);
+        var raiz = new SplitNode(SplitOrientation.Horizontal, a, interno, 0.7);
+        var camino = SplitNode.PathToRoot(c).ToList();
+        Check("el camino de C son 2 splits, de abajo hacia arriba",
+            camino.Count == 2 && ReferenceEquals(camino[0].Split, interno) && ReferenceEquals(camino[1].Split, raiz));
+        Check("en cada split C esta del lado Second (se colapsa First)", !camino[0].KeepFirst && !camino[1].KeepFirst);
+        var caminoB = SplitNode.PathToRoot(b).ToList();
+        Check("B: First en el interno, Second en la raiz", caminoB[0].KeepFirst && !caminoB[1].KeepFirst);
+        Check("A: un solo split, conserva First", SplitNode.PathToRoot(a).Single().KeepFirst);
+        Check("la raiz no tiene camino", !SplitNode.PathToRoot(raiz).Any());
+
+        var vm = new BoardViewModel();
+        vm.ReplaceRoot(raiz);
+        var antes = BoardStore.Serialize([new TabData("Board 1", vm.Root)]);
+        vm.ToggleExpand(c);
+        Check("C queda expandido y seleccionado", ReferenceEquals(vm.Expanded, c) && ReferenceEquals(vm.Selected, c));
+        Check("los tapados se congelan, el expandido no", a.IsFrozen && b.IsFrozen && !c.IsFrozen);
+        Check("expandir NO toca ningun Ratio (no marca cambios)", raiz.Ratio == 0.7 && interno.Ratio == 0.3);
+        Check("expandir NO cambia el documento serializado",
+            BoardStore.Serialize([new TabData("Board 1", vm.Root)]) == antes);
+
+        vm.EndInteractiveResize();   // el divisor del panel descongela el board entero...
+        Check("...pero los tapados SIGUEN congelados", a.IsFrozen && b.IsFrozen);
+
+        vm.ToggleExpand(c);
+        Check("F de nuevo restaura y descongela", vm.Expanded is null && !a.IsFrozen && !b.IsFrozen);
+
+        vm.Expand(b);
+        vm.Split(a, SplitOrientation.Vertical);
+        Check("partir suelta la expansion (y descongela)", vm.Expanded is null && !b.IsFrozen && !c.IsFrozen);
+
+        vm.Expand(c);
+        vm.Suspend();
+        Check("cambiar de pestana suelta la expansion", vm.Expanded is null);
+        vm.Resume();
+        Check("y al volver nadie queda congelado", vm.AllSectors.All(s => !s.IsFrozen));
+
+        var unico = new BoardViewModel();
+        unico.Expand(unico.AllSectors.Single());
+        Check("un board de un solo sector no se expande", unico.Expanded is null);
+    }
+
+    private static void CorrerUnaVezEsDeTiempoDeEjecucion()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 23. CORRER TODO UNA VEZ: SOLO VIDEO VISIBLE, PESTANA + PANEL, SIN CAMBIOS SIN GUARDAR ===");
+
+        Check("video con player corre", RunOnce.IsTarget(MediaKind.Video, hasPlayer: true, frozen: false));
+        Check("imagen NO corre", !RunOnce.IsTarget(MediaKind.Image, true, false));
+        Check("vacio NO corre", !RunOnce.IsTarget(MediaKind.None, false, false));
+        Check("video sin player (ausente) NO corre", !RunOnce.IsTarget(MediaKind.Video, false, false));
+        Check("video congelado (tapado por expandir) NO corre", !RunOnce.IsTarget(MediaKind.Video, true, true));
+
+        var t1 = SectorCon(@"D:\clips\r1.mp4", 1000, 3000, 100, false);
+        var t2 = SectorCon(@"D:\clips\r2.mp4", 0, 0, 100, false);
+        var fijar = SectorCon(@"D:\clips\rp.mp4", 0, 2000, 100, false);
+        var activa = new BoardViewModel();
+        activa.ReplaceRoot(new SplitNode(SplitOrientation.Horizontal, t1, new SplitNode(SplitOrientation.Vertical, t2, fijar)));
+        var fondo = SectorCon(@"D:\clips\rf.mp4", 0, 100, 100, false);
+        var deFondo = new BoardViewModel();
+        deFondo.ReplaceRoot(fondo);
+        var dock = new PinnedDock();
+        var enPanel = dock.Pin(activa, fijar)!;
+
+        var alcance = RunOnce.Scope(activa, dock.Board).ToList();
+        Check("el alcance trae la pestana activa", alcance.Contains(t1) && alcance.Contains(t2));
+        Check("y el panel fijado", alcance.Contains(enPanel));
+        Check("y NO la pestana de fondo", !alcance.Contains(fondo));
+        Check("ausentes (sin player) quedan fuera de los objetivos", RunOnce.Targets(alcance).Count == 0);
+
+        // Guardado, y despues se arranca la corrida en todos: el documento NO cambia.
+        var tabs = new List<TabData> { new("Board 1", activa.Root) };
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-runonce.mboard");
+        BoardStore.SaveTo(archivo, tabs, 0, dock.ToData());
+        foreach (var s in alcance) s.BeginRunOnce();
+        Check("la corrida queda en curso", alcance.All(s => s.IsRunningOnce));
+        Check("NO toca LOOP ni ping-pong", alcance.All(s => s.LoopEnabled && !s.PingPong));
+        Check("NO toca los markers", t1.LoopStartMs == 1000 && t1.LoopEndMs == 3000);
+        Check("MatchesFile sigue true (sin \u2022)", BoardStore.MatchesFile(archivo, tabs, dock.ToData()));
+
+        // Cualquier accion del usuario sobre el sector la cancela para ESE sector.
+        t1.LoopStartMs = 1500;
+        Check("mover un marker cancela", !t1.IsRunningOnce && t2.IsRunningOnce);
+        t2.SeekTo(500);
+        Check("buscar en la timeline cancela", !t2.IsRunningOnce);
+        enPanel.TogglePlay();
+        Check("play/pausa cancela", !enPanel.IsRunningOnce);
+        t1.BeginRunOnce();
+        t1.LoopEnabled = false;
+        Check("LOOP cancela", !t1.IsRunningOnce);
+        t1.BeginRunOnce();
+        t1.BeginRunOnce();
+        Check("arrancar de nuevo reinicia (sigue en curso)", t1.IsRunningOnce);
+        t1.Unload();
+        Check("vaciar el sector cancela", !t1.IsRunningOnce);
+
+        File.Delete(archivo);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

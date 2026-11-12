@@ -629,6 +629,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
         // Una generación en curso para el clip que se va se MATA: nadie va a mirar su resultado.
         CancelPingPong();
+        CancelRunOnce();
 
         var player = Player;
 
@@ -673,6 +674,8 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
     public void TogglePlay()
     {
+        // Play/pausa del usuario manda sobre "correr una vez": se cancela para ESTE sector.
+        CancelRunOnce();
         if (Player is null) return;
 
         // Clip cargado pero nunca arrancado (la vista todavía no lo disparó): el primer play
@@ -829,6 +832,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// </summary>
     public void SeekTo(double ms)
     {
+        CancelRunOnce();   // un click en la timeline es el usuario tomando el control
         if (_playbackPath is not null) SeekPlayback(PingPongMath.FromOriginal(ms, _ppStartMs, _ppEndMs));
         else SeekPlayback(ms);
     }
@@ -909,7 +913,12 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         else if (length > 0 && Math.Abs(DurationMs - length) > 1)
         {
             DurationMs = length;
-            if (LoopEndMs <= LoopStartMs) LoopEndMs = length;
+            if (LoopEndMs <= LoopStartMs)
+            {
+                _settingDefaultZone = true;
+                try { LoopEndMs = length; }
+                finally { _settingDefaultZone = false; }
+            }
 
             // El media acaba de abrir de verdad: recién ahora VLC tiene salida de audio y
             // acepta el volumen. Ver ApplyAudio.
@@ -969,8 +978,21 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         var length = PlayLengthMs;
         if (Player is null || length <= 0) return;
 
+        // Preparando la corrida: el clip está pausado en A esperando la largada. El loop no
+        // vigila (A puede estar "fuera de zona" un instante mientras el seek aterriza).
+        if (_runOnce == RunOnceState.Preparing) return;
+        var runOnce = _runOnce == RunOnceState.Running;
+
         double start, end;
-        if (_playbackPath is not null)
+        if (_playbackPath is not null && runOnce)
+        {
+            // Correr una vez en ping-pong = solo la IDA del generado, [0, d): es el tramo A→B
+            // hacia adelante y no obliga a re-montar al original (cientos de ms de desfase).
+            start = 0;
+            end = _ppEndMs - _ppStartMs;
+            if (end <= 0) end = length;
+        }
+        else if (_playbackPath is not null)
         {
             // PING-PONG: la zona es el archivo generado ENTERO hasta el final de la vuelta (2d),
             // en tiempo del generado. Los markers NO entran acá: pueden estar moviéndose (el
@@ -983,7 +1005,8 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         }
         else
         {
-            if (!LoopEnabled) return;
+            // La corrida usa la zona A→B aunque el LOOP esté apagado (decisión del usuario).
+            if (!LoopEnabled && !runOnce) return;
 
             // La zona se sanea en cada vuelta en vez de confiar en los campos crudos: si LoopEnd
             // todavía no se inicializó, o quedó fuera de rango por un board editado a mano, el
@@ -1010,6 +1033,18 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
         if (Environment.TickCount64 - _lastSeekTick < _seekCooldownMs) return;
 
+        if (runOnce)
+        {
+            // Llegó a B (o terminó): se PAUSA ahí, con el último cuadro a la vista, y se sale del
+            // modo. Sin relanzar: es "una vez". El margen de cola (TailGuardMs) hace que con B =
+            // final del clip se pause ANTES de Ended, que dejaría la superficie en negro.
+            if (!ended && _playMs < end - LoopGuardMs) return;
+            _runOnce = RunOnceState.None;
+            if (!ended) Player.SetPause(true);
+            IsPlaying = false;
+            return;
+        }
+
         // TRES casos disparan la vuelta al marker A:
         //  1) el clip TERMINÓ — el caso de la zona por defecto, donde el playhead nunca llega a
         //     "cruzar" B porque VLC corta el stream primero;
@@ -1031,6 +1066,150 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
         SeekPlayback(start);
     }
+
+    #region Correr una vez (sincronizado)
+
+    private enum RunOnceState { None, Preparing, Running }
+
+    /// <summary>
+    /// "Correr todo una vez" para ESTE sector. Es un override de TIEMPO DE EJECUCIÓN: no toca
+    /// LoopEnabled ni PingPong ni los markers, no viaja en MediaSnapshot y BoardStore no lo ve —
+    /// por eso arrancarlo no pinta el "•". Lo orquesta Board/RunOnce (dos fases).
+    /// </summary>
+    private RunOnceState _runOnce;
+
+    /// <summary>Esperando que VLC llegue a Playing para recién ahí pausar y buscar A (un pause en Opening se pierde).</summary>
+    private bool _runOnceAwaitOpen;
+
+    /// <summary>Cuándo se pidió el seek a A en pausa: el cuadro tarda un momento en aterrizar.</summary>
+    private long _runOnceSeekTick;
+
+    /// <summary>Punto de largada en tiempo del archivo que reproduce VLC (0 en ping-pong = marker A).</summary>
+    private double _runOnceStartPlayMs;
+
+    /// <summary>Margen tras el seek en pausa antes de darlo por listo: ~4 latidos. El seek no es frame-exact igual.</summary>
+    private const long RunOnceSettleMs = 150;
+
+    private bool _settingDefaultZone;
+
+    public bool IsRunningOnce => _runOnce != RunOnceState.None;
+
+    /// <summary>
+    /// Fase 1: pausa el clip y lo lleva a A, SIN arrancarlo. Volver a llamarlo con la corrida en
+    /// curso la reinicia (el botón apretado de nuevo).
+    ///
+    /// ⚠ No usa RestartFrom salvo que VLC esté Ended/Stopped: RestartFrom reabre el archivo y son
+    /// cientos de ms de desfase entre sectores, justo lo que la fase 2 existe para evitar.
+    /// ⚠ Un clip PENDIENTE (sin superficie todavía) no puede pausarse ni buscarse: se le cambia el
+    /// media pendiente por uno que arranca en A y corre cuando la vista lo dispare (bugs 1 y 6),
+    /// sin sincronía — es el único caso que no sale alineado.
+    /// </summary>
+    public void BeginRunOnce()
+    {
+        // Quién corre lo decide el coordinador (RunOnce.Targets: video con player); acá solo se
+        // prepara. Así el modelo se puede probar sin VLC.
+        CancelRunOnce();
+
+        _runOnceStartPlayMs = _playbackPath is not null
+            ? 0
+            : PingPongMath.EffectiveZone(LoopStartMs, LoopEndMs, DurationMs > 0 ? DurationMs : Math.Max(LoopEndMs, LoopStartMs)).Start;
+        _runOnce = RunOnceState.Preparing;
+        _runOnceAwaitOpen = false;
+        _runOnceSeekTick = Environment.TickCount64;
+
+        if (Player is not { } player) return;   // sin VLC (BoardProbe): solo el estado
+
+        if (_pending is not null)
+        {
+            if ((_playbackPath ?? MediaPath) is { } path)
+            {
+                _pending.Dispose();
+                _pending = NewMediaAt(path, _runOnceStartPlayMs);
+                SetPlayPosition(_runOnceStartPlayMs);
+            }
+            _runOnce = RunOnceState.Running;
+            return;
+        }
+
+        switch (player.State)
+        {
+            case VLCState.Playing or VLCState.Paused:
+                PauseAtRunOnceStart(player);
+                break;
+            case VLCState.Ended or VLCState.Stopped or VLCState.Error:
+                RestartFrom(_runOnceStartPlayMs);
+                _runOnceAwaitOpen = true;
+                break;
+            default:   // Opening / Buffering / NothingSpecial: se espera a Playing
+                _runOnceAwaitOpen = true;
+                break;
+        }
+    }
+
+    private void PauseAtRunOnceStart(MediaPlayer player)
+    {
+        player.SetPause(true);
+        SeekPlayback(_runOnceStartPlayMs);
+        IsPlaying = false;
+        _runOnceSeekTick = Environment.TickCount64;
+    }
+
+    /// <summary>
+    /// ¿Listo para la largada? Lo consulta el coordinador cada ~15 ms. También empuja el paso
+    /// pendiente: un clip que estaba abriendo se pausa y se lleva a A apenas llega a Playing.
+    /// Un sector que ya no está preparando (cancelado, descargado, congelado) no frena a nadie.
+    /// </summary>
+    public bool PollRunOnceReady()
+    {
+        if (_runOnce != RunOnceState.Preparing || Player is not { } player || IsFrozen) return true;
+
+        if (_runOnceAwaitOpen)
+        {
+            if (player.State != VLCState.Playing) return false;
+            _runOnceAwaitOpen = false;
+            PauseAtRunOnceStart(player);
+            return false;
+        }
+
+        return player.State == VLCState.Paused &&
+               Environment.TickCount64 - _runOnceSeekTick >= RunOnceSettleMs;
+    }
+
+    /// <summary>
+    /// Fase 2: la largada. El coordinador la llama sobre TODOS en la misma vuelta del Dispatcher.
+    /// Solo despausa (barato e inmediato): todo lo caro ya se pagó en la fase 1.
+    /// </summary>
+    public void GoRunOnce()
+    {
+        if (_runOnce != RunOnceState.Preparing) return;
+        _runOnce = RunOnceState.Running;
+        _runOnceAwaitOpen = false;
+
+        // Congelado (arrastre, pestaña de fondo, tapado por una expansión): arranca al descongelar.
+        if (IsFrozen)
+        {
+            _resumeAfterThaw = true;
+            return;
+        }
+
+        if (Player is not { } player) return;
+        if (player.State == VLCState.Paused) player.SetPause(false);
+
+        // El reloj de la extrapolación arranca en la largada, no cuando se pausó en A.
+        Reanchor(_playMs);
+        _lastSeekTick = Environment.TickCount64;
+        _seekCooldownMs = ReseekCooldownMs;
+        IsPlaying = true;
+    }
+
+    /// <summary>Sale del modo sin tocar el reproductor: lo que el usuario hizo manda.</summary>
+    public void CancelRunOnce()
+    {
+        _runOnce = RunOnceState.None;
+        _runOnceAwaitOpen = false;
+    }
+
+    #endregion
 
     #region Ping-pong (loop ida y vuelta) — orquestación
 
@@ -1082,6 +1261,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
     partial void OnPingPongChanged(bool value)
     {
+        CancelRunOnce();
         if (value)
         {
             // Ida y vuelta es un MODO del loop: sin loop no hay zona que invertir. Prenderlo
@@ -1101,6 +1281,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
     partial void OnLoopEnabledChanged(bool value)
     {
+        CancelRunOnce();
         if (!value && PingPong) PingPong = false;
     }
 
@@ -1111,6 +1292,9 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
 
     private void OnZoneChanged()
     {
+        // Mover un marker cancela la corrida (salvo la zona por defecto que pone el Tick al
+        // conocer la duración: eso no es el usuario, ver _settingDefaultZone).
+        if (!_settingDefaultZone) CancelRunOnce();
         if (PingPong) RequestPingPong(debounce: true);
         // Un rechazo ("Zona > 30 s") explica el ÚLTIMO intento. Si el usuario ya movió los
         // markers para arreglarlo, el cartel quedaría acusando a una zona que ya no existe.
@@ -1258,6 +1442,10 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     private void SwitchPlayback(string? generated, double startPlayMs)
     {
         if (MediaPath is not { } original) return;
+
+        // Cambiar de archivo (original <-> generado) es un re-montaje: la corrida sincronizada ya
+        // no tiene sentido para este sector, sale del modo.
+        CancelRunOnce();
 
         _pending?.Dispose();
         _pending = null;

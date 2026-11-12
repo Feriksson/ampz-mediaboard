@@ -155,6 +155,61 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
 
     public IEnumerable<SectorNode> AllSectors => SplitNode.Sectors(Root);
 
+    #region Expandir un sector
+
+    /// <summary>
+    /// El sector EXPANDIDO a todo el board, o null. Es estado de VISTA en tiempo de ejecución:
+    /// no se persiste ni toca ningún Ratio (escribir un Ratio marcaría el documento con "•").
+    /// La vista (<see cref="BoardView"/>) lo materializa colapsando las pistas del camino a la
+    /// raíz, SIN re-parentar el VideoView: re-parentar = re-montar (bug #4).
+    /// </summary>
+    [ObservableProperty] private SectorNode? _expanded;
+
+    /// <summary>¿Este sector quedó TAPADO por la expansión de otro? Los tapados están congelados.</summary>
+    public bool IsHiddenByExpand(SectorNode sector) =>
+        Expanded is { } expanded && !ReferenceEquals(expanded, sector);
+
+    /// <summary>F / el botón ⤢ de la cabecera: expande, o restaura si ya era el expandido.</summary>
+    public void ToggleExpand(SectorNode sector)
+    {
+        if (ReferenceEquals(Expanded, sector)) CollapseExpand();
+        else Expand(sector);
+    }
+
+    /// <summary>
+    /// Expande <paramref name="sector"/>. Los demás se CONGELAN (mismo Freeze del arrastre y de la
+    /// pestaña de fondo): un video tapado que sigue decodificando es CPU tirada, y su ventana
+    /// nativa tiene que esconderse igual (la vista hace la otra mitad con SetFrozen).
+    /// Un board de un solo sector no tiene nada que expandir.
+    /// </summary>
+    public void Expand(SectorNode sector)
+    {
+        if (Root is SectorNode || !AllSectors.Contains(sector)) return;
+        if (Expanded is not null) CollapseExpand();
+
+        // La vista reacciona al cambio de la propiedad (colapsa pistas y congela superficies)
+        // ANTES de que los nodos se pausen: así nunca hay un video tapado visible y corriendo.
+        Expanded = sector;
+        foreach (var other in AllSectors)
+            if (!ReferenceEquals(other, sector)) other.Freeze();
+        Select(sector);
+    }
+
+    /// <summary>
+    /// Sale de la expansión: la vista restaura pistas desde los Ratio del modelo y los tapados se
+    /// descongelan — solo se reanuda lo que estaba reproduciendo (_resumeAfterThaw), como siempre.
+    /// Thaw es no-op para el expandido (no estaba congelado).
+    /// </summary>
+    public void CollapseExpand()
+    {
+        if (Expanded is null) return;
+        Expanded = null;
+        if (IsSuspended) return;
+        foreach (var sector in AllSectors) sector.Thaw();
+    }
+
+    #endregion
+
     public void Select(SectorNode sector)
     {
         _lastSelected = sector;
@@ -242,6 +297,10 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         // se queda con una sola celda para siempre. Este bug ya pasó una vez; no lo revivas.
         var previousParent = sector.Parent;
 
+        // Cambia la forma del árbol → la vista se reconstruye: la expansión se suelta ANTES, con
+        // los Grid viejos todavía vivos, para que los tapados se descongelen por el camino normal.
+        CollapseExpand();
+
         var fresh = new SectorNode { BoardMasterVolume = MasterVolume };
         var split = new SplitNode(orientation, sector, fresh);
 
@@ -269,6 +328,7 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     /// </summary>
     public void Close(SectorNode sector)
     {
+        CollapseExpand();   // ver Split: cambia la forma del árbol
         if (sector.Parent is not { } parent)
         {
             sector.Unload();
@@ -306,6 +366,10 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     {
         if (ReferenceEquals(source, target)) return;
 
+        // Intercambiar recarga clips: se sale de la expansión para no dejar un recién llegado
+        // congelado detrás de una pista colapsada.
+        CollapseExpand();
+
         // Las dos fotos se toman ANTES de tocar nada: restaurar sobre uno modifica ese nodo, y
         // si sacáramos la segunda foto después ya estaría leyendo el contenido recién puesto.
         var fromSource = source.TakeSnapshot();
@@ -333,6 +397,9 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     /// </summary>
     public void Distribute()
     {
+        // ApplyRatios reescribe TODAS las GridLength: con un sector expandido devolvería espacio a
+        // pistas colapsadas (huecos negros). Distribuir es "verlos a todos": se sale de la expansión.
+        CollapseExpand();
         DistributeInto(Root);
         RatiosChanged?.Invoke();
     }
@@ -374,7 +441,10 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
         // arrancar clips en una pestaña que nadie ve; los deja congelados y Resume los devuelve
         // al volver — con el _resumeAfterThaw que anotó el arrastre, que es el correcto.
         if (IsSuspended) return;
-        foreach (var sector in AllSectors) sector.Thaw();
+        // ⚠ Los tapados por la expansión NO se descongelan: el divisor del panel congela y
+        // descongela TODO el board, y sin este filtro un video escondido volvería a decodificar.
+        foreach (var sector in AllSectors)
+            if (!IsHiddenByExpand(sector)) sector.Thaw();
     }
 
     /// <summary>
@@ -400,6 +470,13 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     public void Suspend()
     {
         if (IsSuspended) return;
+
+        // Cambiar de pestaña suelta la expansión. SIN descongelar los tapados: el Freeze de abajo
+        // los dejaría congelados de nuevo, y su _resumeAfterThaw (lo que reproducían al expandir)
+        // ya está anotado — Resume los devuelve con el resto. Antes de IsSuspended para que la
+        // vista restaure las pistas antes de colapsarse.
+        Expanded = null;
+
         IsSuspended = true;
         _tick.Stop();
         foreach (var sector in AllSectors) sector.Freeze();
@@ -421,6 +498,8 @@ public sealed partial class BoardViewModel : ObservableObject, IDisposable
     /// <summary>Reemplaza el board entero (lo usa la carga desde disco).</summary>
     public void ReplaceRoot(LayoutNode root)
     {
+        CollapseExpand();
+
         // Dispose NO bloquea: cada sector desengancha su player acá y lo detiene en otro hilo,
         // todos en paralelo (ver VlcEngine.Release). "Nuevo"/"Abrir" sobre un board con seis
         // clips ya no congela la ventana medio segundo por clip.

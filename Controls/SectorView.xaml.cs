@@ -59,9 +59,34 @@ public partial class SectorView : UserControl
         get => _board;
         set
         {
+            if (_board is not null) _board.PropertyChanged -= OnBoardChanged;
             _board = value;
+            if (_board is not null) _board.PropertyChanged += OnBoardChanged;
             SyncHeader();
+            SyncExpand();
         }
+    }
+
+    private void OnBoardChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(BoardViewModel.Expanded)) SyncExpand();
+    }
+
+    /// <summary>
+    /// El ⤢ según la expansión del board: ⤢ "Expandir (F)" o ⇲ apretado "Restaurar (F / Esc)".
+    /// Cabecera pura, WPF: la expansión en sí la hace BoardView sin tocar el VideoView.
+    /// </summary>
+    private void SyncExpand()
+    {
+        var expanded = _node is not null && ReferenceEquals(_board?.Expanded, _node);
+        // Un board de UN sector no tiene nada que expandir. Cambiar la forma del árbol reconstruye
+        // las vistas (Board se re-asigna), así que esto se re-evalúa solo al partir o cerrar.
+        ExpandButton.Visibility = _board?.Root is SplitNode ? Visibility.Visible : Visibility.Collapsed;
+        ExpandButton.Content = expanded ? "⇲" : "⤢";
+        ExpandButton.ToolTip = expanded ? "Restaurar (F / Esc)" : "Expandir (F)";
+        System.Windows.Automation.AutomationProperties.SetName(ExpandButton, expanded ? "Restaurar sector" : "Expandir sector");
+        ExpandButton.Background = expanded ? PinnedFill : Brushes.Transparent;
+        ExpandButton.SetResourceReference(ForegroundProperty, expanded ? "AccentBrush" : "DimTextBrush");
     }
 
     public SectorView()
@@ -76,6 +101,7 @@ public partial class SectorView : UserControl
         CopyPathButton.Click += (_, _) => CopyPathToClipboard();
         CloseButton.Click += (_, _) => { if (_node is not null) Board?.Close(_node); };
         PinButton.Click += (_, _) => { if (_node is not null) Board?.RequestPin(_node); };
+        ExpandButton.Click += (_, _) => { if (_node is not null) Board?.ToggleExpand(_node); };
         PlayButton.Click += (_, _) => _node?.TogglePlay();
         BrowseButton.Click += (_, _) => BrowseForMedia();
         RelinkButton.Click += (_, _) => BrowseForMedia();
@@ -240,6 +266,7 @@ public partial class SectorView : UserControl
         SyncRender();
         SyncTimeLabel();
         SyncPingPong();
+        SyncExpand();
     }
 
     private void OnNodeChanged(object? sender, PropertyChangedEventArgs e)
@@ -661,6 +688,7 @@ public partial class SectorView : UserControl
         Video.MediaPlayer = null;
         if (Video is IDisposable disposable) disposable.Dispose();
         if (_node is not null) _node.PropertyChanged -= OnNodeChanged;
+        if (_board is not null) _board.PropertyChanged -= OnBoardChanged;
     }
 
     #region Drag & drop

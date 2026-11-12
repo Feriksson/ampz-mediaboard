@@ -75,6 +75,21 @@ public sealed partial class SplitNode : LayoutNode
         else if (ReferenceEquals(oldChild, Second)) Second = newChild;
     }
 
+    /// <summary>
+    /// El camino de <paramref name="node"/> a la raíz: cada split ancestro y qué lado CONSERVA
+    /// (true = First). Es la regla de "expandir un sector": en cada split del camino, el lado del
+    /// sector se queda con todo y el otro (con su splitter) se colapsa. Pura, para BoardProbe.
+    /// </summary>
+    public static IEnumerable<(SplitNode Split, bool KeepFirst)> PathToRoot(LayoutNode node)
+    {
+        var child = node;
+        while (child.Parent is { } split)
+        {
+            yield return (split, ReferenceEquals(split.First, child));
+            child = split;
+        }
+    }
+
     /// <summary>Recorrido en profundidad: todas las hojas de este subárbol.</summary>
     public static IEnumerable<SectorNode> Sectors(LayoutNode root)
     {
