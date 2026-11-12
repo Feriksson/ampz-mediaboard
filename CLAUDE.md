@@ -430,8 +430,12 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 | `Ctrl+E` | Distribuir |
 | `Ctrl+R` | Correr todo una vez (pestaña activa + panel) |
 | `F11` / `Esc` | Pantalla completa / salir (`Esc` sale antes de una expansión) |
+| `F1` / `?` | Popup de atajos (no en pantalla completa) |
 
 - Atajos en `PreviewKeyDown` (en `KeyDown` un botón enfocado se come el Espacio).
+- **Ayuda = Popup** (`HelpPopup`, lista en `MainWindow.ShortcutHelp`: agregar un atajo = sumarlo ahí).
+  ⚠ No volver a una línea de texto fija en la barra (se encimaba con los botones). ⚠ Popup y no
+  overlay: es ventana propia, queda sobre los HWND de video.
 - **Pantalla completa**: guarda y restaura `WindowStyle`/`WindowState`/`ResizeMode`. ⚠ `Normal` antes de
   `Maximized` (si no, la taskbar queda encima). ⚠ `F11`/`Esc` antes del guard de "sector seleccionado";
   `Esc` solo `Handled` en pantalla completa. Cambiar `WindowStyle` no recrea el HWND.

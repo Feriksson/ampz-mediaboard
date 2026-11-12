@@ -115,6 +115,7 @@ public partial class MainWindow : Window
         SaveAsButton.Click += (_, _) => SaveAs();
         DistributeButton.Click += (_, _) => Board.Distribute();
         RunOnceButton.Click += (_, _) => RunAllOnce();
+        HelpList.ItemsSource = ShortcutHelp;
         AssociateButton.Click += (_, _) => Associate();
 
         // La tira desborda desplazándose: la rueda del mouse la mueve en horizontal (la barra
@@ -132,6 +133,9 @@ public partial class MainWindow : Window
         // PreviewKeyDown y no KeyDown: si el foco quedó en un botón, el KeyDown de Espacio lo
         // consume el botón (lo interpreta como "apretarme") y el atajo nunca llega acá.
         PreviewKeyDown += OnPreviewKeyDown;
+        // Al entrar en pantalla completa la barra desaparece: el Popup no puede quedar abierto
+        // colgado de un ancla invisible.
+        TopBar.IsVisibleChanged += (_, _) => { if (!TopBar.IsVisible) HelpPopup.IsOpen = false; };
 
         // Confirmar el renombre con un click en CUALQUIER otro lado, o al irse a otra ventana.
         // Ver OnWindowPreviewMouseDown: el LostKeyboardFocus de la caja NO alcanza.
@@ -1127,6 +1131,33 @@ public partial class MainWindow : Window
         VersionLabel.Text = texto;
     }
 
+    /// <summary>
+    /// Contenido del Popup de ayuda ("?" / F1). Vive acá, al lado de OnPreviewKeyDown, para que
+    /// agregar un atajo y documentarlo sea el mismo cambio. Espejo de la tabla de CLAUDE.md.
+    /// </summary>
+    private static readonly KeyValuePair<string, string>[] ShortcutHelp =
+    [
+        new("Espacio", "Play / pausa del sector seleccionado"),
+        new("A / B", "Marker de inicio / fin en el playhead"),
+        new("L", "Prender / apagar loop"),
+        new("P", "Loop ida y vuelta"),
+        new("F", "Expandir / restaurar el sector (Esc restaura)"),
+        new("Shift+click mute", "Solo"),
+        new("Doble click", "Copiar el path del archivo"),
+        new("Ctrl+V", "Cargar el archivo del portapapeles"),
+        new("Ctrl+R", "Correr todo una vez (A→B, todos juntos)"),
+        new("Ctrl+E", "Distribuir"),
+        new("Ctrl+T / Ctrl+W", "Agregar / quitar pestaña"),
+        new("Ctrl+Tab", "Pestaña siguiente (Shift: anterior)"),
+        new("Ctrl+1…9", "Ir a la pestaña N (9 = última)"),
+        new("Ctrl+Shift+RePág", "Mover pestaña (también AvPág)"),
+        new("Doble click pestaña", "Renombrar"),
+        new("Ctrl+N / Ctrl+O", "Nuevo / Abrir"),
+        new("Ctrl+S", "Guardar (Shift: Guardar como)"),
+        new("F11 / Esc", "Pantalla completa / salir"),
+        new("F1", "Esta ayuda"),
+    ];
+
     #region Pantalla completa
 
     /// <summary>
@@ -1297,6 +1328,13 @@ public partial class MainWindow : Window
 
             case Key.F11:
                 TogglePantallaCompleta();
+                e.Handled = true;
+                return;
+
+            // F1 = ayuda de atajos. En pantalla completa la barra (y el "?" donde se ancla el
+            // Popup) está escondida: ahí no se abre, para no dejar un Popup flotando sin ancla.
+            case Key.F1 when !_pantallaCompleta:
+                HelpPopup.IsOpen = !HelpPopup.IsOpen;
                 e.Handled = true;
                 return;
 
