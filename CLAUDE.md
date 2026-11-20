@@ -199,7 +199,7 @@ ffmpeg -ss A -t d -i <src> -an -sn -dn -filter_complex
   `SetSectorsFrozen(false)` los **saltean** (el divisor del panel descongela todo el board).
 - Se suelta en Split/Close/ReplaceRoot/SwapMedia/Distribute (con Thaw) y en `Suspend` (sin Thaw: el
   Freeze de la suspensión conserva el `_resumeAfterThaw`). Funciona igual en el panel (su BoardView).
-- `Esc` sale primero de la expansión (pestaña y panel), el siguiente de pantalla completa.
+- `Esc` sale primero de la expansión (pestaña y panel), después corta el slideshow, y recién después sale de pantalla completa.
 - Regresión: `BoardProbe` 22. El colapso visual y el airspace NO tienen prueba automática.
 
 ### Correr todo una vez (barra o `Ctrl+R`) — `Board/RunOnce.cs`
@@ -218,6 +218,52 @@ Cada video de la pestaña activa + panel corre A→B UNA vez, todos juntos, y qu
 - Fuera: imágenes, vacíos, ausentes, congelados (tapados por expandir). Un clip **pendiente** arranca
   en A cuando la vista lo dispare, sin sincronía (bugs 1 y 6).
 - Regresión: `BoardProbe` 23 (puro). La sincronía real con VLC NO tiene prueba automática.
+
+### Slideshow (▶ en la barra o `Ctrl+P`) — `Board/Slideshow.cs` + región "Slideshow" de `MainWindow`
+
+Recorre las pestañas en orden cada N s, dando la vuelta, con cuenta regresiva ("7s", "2:05") al lado.
+- Reglas puras (siguiente con vuelta, texto, `TryParse`/clamp 2–3600, `SecondsOrNull`) en `Slideshow`.
+- ⚠ **Lo para cualquier cambio MANUAL** colgándose del único camino: `SwitchTo(tab, bySlideshow)`; todo
+  lo que no sea el timer pasa `false` (click, Ctrl+Tab, Ctrl+1…9, Ctrl+T/W, arrastre, Nuevo/Abrir).
+  Mismo `Activate`/`Deactivate` que a mano: sin re-montajes. El panel no se entera.
+- Siguiente = desde la activa del MOMENTO (`IndexOf`), no un índice guardado: reordenar/cerrar no lo rompe.
+  Con arrastre activo o caja de renombrar abierta el cambio se posterga una vuelta (no se detiene).
+- `Esc`: expansión → **slideshow** → pantalla completa (F11 + Ctrl+P es el uso típico: el primer Esc
+  corta y te deja en la pestaña; el siguiente sale).
+- Botón y no `ToggleButton` (el estado lo decide el código; "apretado" por `Tag="on"`). Timer de 200 ms
+  decidido contra un deadline de `TickCount64`. Campo de intervalo: Enter/click afuera confirma (click
+  afuera por `OnWindowPreviewMouseDown`, como el renombre), Esc descarta, basura vuelve al anterior.
+- Intervalo = del DOCUMENTO (uno global): `"SlideshowSeconds"` en la raíz SOLO si ≠ 10, cambiarlo es
+  cambio sin guardar (todo pasa por `MainWindow.SerializeDocument`). Corriendo o no: runtime, nunca "•".
+- Regresión: `BoardProbe` 24. El timer y el cambio real de pestañas NO tienen prueba automática.
+
+### Efectos de foto (✨ en la cabecera, solo imágenes) — `Media/PhotoEffect.cs` + `SectorView`
+
+None / Ken Burns (100→112% lineal + paneo leve, ida y vuelta SIN FIN mientras se ve; un tramo dura el
+intervalo si corre el slideshow, si no 10 s) / Punch-in (108→100% + fundido, 600 ms ease-out) / Fundido
+(400 ms), estos dos de una pasada. Sin cross-fade entre pestañas (airspace).
+- ✨ = CICLO (cada click cambia y reproduce: recorrerlo es la vista previa); "apretado" con efecto, el
+  tooltip dice cuál. Reglas puras (ciclo, nombres, `ToFile`/`FromFile`, duración, fondo) en `PhotoEffects`.
+- `SectorNode.PhotoEffect`: dato del clip como el ping-pong — viaja en `MediaSnapshot`, `Unload` lo
+  resetea, `Relink`/`Restore` lo conservan. Persistido por NOMBRE (`"PhotoEffect": "KenBurns"`) solo si ≠
+  None; desconocido → None. Cambiarlo es cambio sin guardar.
+- Disparo = `Still.IsVisibleChanged` (pestaña activada, también por slideshow; imagen cargada; vuelta de
+  una expansión) + cambio de efecto/`ImageSource` + **F11 entrar/salir** (`MainWindow` →
+  `SectorView.ReplayPhotoEffects(this)`, recorre el árbol visual: sin evento estático que retenga vistas).
+  Al esconderse se sueltan las animaciones. (Una pasada con HoldEnd dejaba la foto quieta: "no hay efecto".)
+- ⚠ **Fondo desenfocado** (`BackdropHost`/`Backdrop` detrás de `Still`): con `Uniform` la foto deja
+  franjas y el zoom/paneo mueve SU borde (el del elemento no entra; el de la foto sí). Solo con imagen +
+  efecto (`ShowsBackdrop`); sin efecto, letterbox negro (herramienta de estudio). Misma foto en
+  `UniformToFill`, blur 14, opacidad 0,55, estático. ⚠ Barato a propósito (8 sectores, F11): copia de 96 px
+  de lado mayor (`BackdropScale`, `CachedBitmap` congelado, una vez por foto) + `BitmapCache` en el PADRE
+  del blur (no se recalcula mientras la foto anima) + margen negativo (el blur se desvanece en el borde).
+  `Backdrop.Source` se pone en código (no está bindeado).
+- ⚠ Solo `BeginAnimation` sobre transform/Opacity/`RenderTransformOrigin` de la `Image` (nada bindeado
+  salvo `Source`). Paneo moviendo el ORIGEN (relativo): no depende de `ActualWidth` (0 en una pestaña
+  recién activada). Recorte en el `Grid StillFrame` padre (el Clip de la propia Image se transforma con
+  ella). Duración del slideshow: `SectorView.SlideshowIntervalSeconds` (estático, lo pone MainWindow).
+- Regresión: `BoardProbe` 25 (persistencia, snapshot, ciclo) y 26 (regla del fondo, escala). La animación
+  y el fondo NO tienen prueba automática (humo a mano con capturas de la ventana).
 
 ### ⚠ Nunca asignes valor local a una DP con binding OneWay
 
@@ -317,7 +363,7 @@ guardar. **La pestaña activa se persiste (`ActiveTab`) pero NO es cambio sin gu
 ### Mover media entre sectores = INTERCAMBIAR (`BoardViewModel.SwapMedia`)
 
 Soltar sobre ocupado reacomoda, no destruye. Viaja `SectorNode.MediaSnapshot` (path, posición,
-markers, volumen, mute, ping-pong), **nunca el `MediaPlayer`** (atado a su HWND). ⚠ Tomar las DOS fotos
+markers, volumen, mute, ping-pong, efecto de foto), **nunca el `MediaPlayer`** (atado a su HWND). ⚠ Tomar las DOS fotos
 antes de restaurar ninguna. Asa = cabecera (con umbral de arrastre, botones excluidos). ⚠ El origen
 viaja en un campo estático (`SectorView._dragSource`), no en el `DataObject` (COM); se limpia en `finally`.
 
@@ -373,14 +419,14 @@ pregunta (un aviso innecesario se aprende a ignorar).
 ### Formato `.mboard` v2 (`BoardStore`, con DTOs propios)
 
 ```
-{ "Version": 2, "ActiveTab": 0, "Tabs": [ { "Name": "Board 1", "MasterVolume": 40, "Root": {…} } ], "Dock": {…} }
+{ "Version": 2, "ActiveTab": 0, "SlideshowSeconds": 25, "Tabs": [ { "Name": "Board 1", "MasterVolume": 40, "Root": {…} } ], "Dock": {…} }
 ```
 
 - Se escribe siempre v2. El formato viejo (árbol en la raíz, master en el nodo raíz) se lee como UNA
   pestaña con el nombre del archivo.
 - ⚠ El formato se detecta mirando el JSON (`Tabs`/`Version` en la raíz), no con try/catch: un v2 roto
   leído como viejo cargaría vacío y pisaría el bueno. v2 sin pestañas = corrupto.
-- Campos opcionales (`MasterVolume` ≠ 100, `PingPong: true`, `Dock`) se escriben solo si difieren del
+- Campos opcionales (`MasterVolume` ≠ 100, `PingPong: true`, `PhotoEffect` ≠ None, `Dock`, `SlideshowSeconds` ≠ 10) se escriben solo si difieren del
   default, para que archivos viejos comparen igual.
 
 ### ⚠ Archivo ausente: la referencia NO se descarta
@@ -429,7 +475,8 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 | doble click en sector | Copiar el path |
 | `Ctrl+E` | Distribuir |
 | `Ctrl+R` | Correr todo una vez (pestaña activa + panel) |
-| `F11` / `Esc` | Pantalla completa / salir (`Esc` sale antes de una expansión) |
+| `Ctrl+P` | Slideshow: recorrer las pestañas (también ▶ en la barra; `Esc` o cambio manual lo detiene) |
+| `F11` / `Esc` | Pantalla completa / salir (`Esc` sale antes de una expansión y del slideshow) |
 | `F1` / `?` | Popup de atajos (no en pantalla completa) |
 
 - Atajos en `PreviewKeyDown` (en `KeyDown` un botón enfocado se come el Espacio).
@@ -457,8 +504,8 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 | Carpeta | Contenido |
 |---|---|
 | `Layout/` | `LayoutNode`, `SplitNode`, `SectorNode` |
-| `Board/` | `BoardViewModel`, `BoardView`, `BoardTab`, `TabOrder`, `PinnedDock`, `RunOnce` |
-| `Media/` | `VlcEngine`, `MediaKind`, `PingPongMath`, `PingPongRenderer` |
+| `Board/` | `BoardViewModel`, `BoardView`, `BoardTab`, `TabOrder`, `PinnedDock`, `RunOnce`, `Slideshow` |
+| `Media/` | `VlcEngine`, `MediaKind`, `PingPongMath`, `PingPongRenderer`, `PhotoEffect` |
 | `Controls/` | `SectorView` (capa de render), `LoopTimeline` |
 | `Persistence/` | `AppPaths`, `BoardStore`, `BoardFile` |
 | raíz | `App`, `MainWindow`, `DiagLog`, íconos |
@@ -466,7 +513,7 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 
 **Pruebas** (`tools/`):
 - Sondas `dotnet run`, salen 0/1: `LoopProbe` (binding del playhead), `BoardProbe` (swap, persistencia,
-  ausente, distribuir, solo, master, pestañas, reorden, panel, ping-pong puro, expandir, correr una vez), `RestartProbe` (reinicio
+  ausente, distribuir, solo, master, pestañas, reorden, panel, ping-pong puro, expandir, correr una vez, slideshow, efecto de foto), `RestartProbe` (reinicio
   del loop, toca VLC), `PingPongProbe` (ffmpeg real). `WarmupProbe` **mide**, no testea.
 - `test-*.ps1` contra la app corriendo: missing, loop, restart, close, tabs, tab-reorder, dock, audio,
   replace, pingpong, warmup, fullscreen, doubleclick, multi, boardfile. Código **2** = no se pudo medir

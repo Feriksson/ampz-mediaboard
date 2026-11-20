@@ -41,6 +41,9 @@ internal static class Program
         PingPongSeGuardaYViaja();
         ExpandirColapsaElCaminoYCongelaLosTapados();
         CorrerUnaVezEsDeTiempoDeEjecucion();
+        SlideshowRecorreYGuardaSoloElIntervalo();
+        EfectoDeFotoSeGuardaYViaja();
+        FondoDesenfocadoSoloConEfecto();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -909,6 +912,152 @@ internal static class Program
         Check("vaciar el sector cancela", !t1.IsRunningOnce);
 
         File.Delete(archivo);
+    }
+
+    private static void SlideshowRecorreYGuardaSoloElIntervalo()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 24. SLIDESHOW: SIGUIENTE CON VUELTA, CUENTA REGRESIVA, INTERVALO SOLO SI != 10 ===");
+
+        Check("de la 0 a la 1", Slideshow.NextIndex(0, 3) == 1);
+        Check("de la ultima vuelve a la primera", Slideshow.NextIndex(2, 3) == 0);
+        Check("con una sola pestana se queda en ella", Slideshow.NextIndex(0, 1) == 0);
+        Check("indice invalido (pestana que ya no esta) arranca en la primera", Slideshow.NextIndex(-1, 3) == 0 && Slideshow.NextIndex(5, 3) == 0);
+
+        Check("6,2 s restantes = \"7s\" (redondea para arriba)", Slideshow.CountdownText(6200) == "7s");
+        Check("exacto 10 s = \"10s\"", Slideshow.CountdownText(10000) == "10s");
+        Check("nunca \"0s\"", Slideshow.CountdownText(0) == "1s" && Slideshow.CountdownText(-50) == "1s");
+        Check("desde el minuto, m:ss", Slideshow.CountdownText(125_000) == "2:05");
+
+        Check("\"15\" se lee 15", Slideshow.TryParse("15", out var quince) && quince == 15);
+        Check("\" 15s \" tambien", Slideshow.TryParse(" 15s ", out var quinceS) && quinceS == 15);
+        Check("por debajo del piso se acota a 2", Slideshow.TryParse("1", out var uno) && uno == Slideshow.MinSeconds);
+        Check("por encima del techo se acota a 3600", Slideshow.TryParse("99999", out var mucho) && mucho == Slideshow.MaxSeconds);
+        Check("basura no se acepta", !Slideshow.TryParse("abc", out _) && !Slideshow.TryParse("", out _));
+
+        // Persistencia: el intervalo es del DOCUMENTO, en la raiz, y SOLO si difiere del default.
+        var tabs = new List<TabData> { new("Board 1", SectorCon(@"D:\clips\s.mp4", 0, 1000, 100, false)) };
+        var porDefecto = BoardStore.Serialize(tabs);
+        Check("el default (10) NO se escribe", !porDefecto.Contains("SlideshowSeconds"));
+        Check("un 10 explicito serializa igual que la ausencia",
+            BoardStore.Serialize(tabs, null, null, Slideshow.DefaultSeconds) == porDefecto);
+        Check("otro valor SI se escribe", BoardStore.Serialize(tabs, null, null, 25).Contains("\"SlideshowSeconds\": 25"));
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-slideshow.mboard");
+        Check("se pudo guardar con 25 s", BoardStore.SaveTo(archivo, tabs, 0, null, 25) is null);
+        var leido = BoardStore.LoadFrom(archivo);
+        Check("vuelve en 25", leido?.SlideshowSeconds == 25);
+        Check("releido sin tocar NO es un cambio", leido is not null && BoardStore.MatchesFile(archivo, leido.Tabs, leido.Dock, 25));
+        Check("cambiar el intervalo SI es un cambio", leido is not null && !BoardStore.MatchesFile(archivo, leido.Tabs, leido.Dock, 30));
+
+        // Un v2 anterior a la feature (sin el campo) carga con 10 y NO se lee modificado.
+        var viejo = Path.Combine(Path.GetTempPath(), "probe-slideshow-viejo.mboard");
+        File.WriteAllText(viejo, """{"Version":2,"ActiveTab":0,"Tabs":[{"Name":"Uno","Root":{"Type":"sector","Volume":80}}]}""");
+        var leidoViejo = BoardStore.LoadFrom(viejo);
+        Check("un archivo sin el campo carga con 10", leidoViejo?.SlideshowSeconds == Slideshow.DefaultSeconds);
+        Check("y NO se lee como modificado", leidoViejo is not null &&
+            BoardStore.MatchesFile(viejo, leidoViejo.Tabs, leidoViejo.Dock, leidoViejo.SlideshowSeconds));
+
+        // Tocado a mano: un "SlideshowSeconds": 10 explicito normaliza a ausente, un 1 se acota.
+        File.WriteAllText(viejo, """{"Version":2,"SlideshowSeconds":10,"Tabs":[{"Name":"Uno","Root":{"Type":"sector","Volume":80}}]}""");
+        var explicito = BoardStore.LoadFrom(viejo);
+        Check("un 10 escrito a mano tampoco es un cambio", explicito is not null &&
+            BoardStore.MatchesFile(viejo, explicito.Tabs, explicito.Dock, explicito.SlideshowSeconds));
+        File.WriteAllText(viejo, """{"Version":2,"SlideshowSeconds":1,"Tabs":[{"Name":"Uno","Root":{"Type":"sector","Volume":80}}]}""");
+        Check("un 1 escrito a mano carga acotado a 2", BoardStore.LoadFrom(viejo)?.SlideshowSeconds == Slideshow.MinSeconds);
+
+        File.Delete(archivo);
+        File.Delete(viejo);
+    }
+
+    private static void EfectoDeFotoSeGuardaYViaja()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 25. EFECTO DE FOTO: CICLO, SE GUARDA SOLO SI != None, VIAJA CON LA FOTO ===");
+
+        Check("ciclo: None -> Ken Burns -> Punch-in -> Fundido -> None",
+            PhotoEffects.Next(PhotoEffect.None) == PhotoEffect.KenBurns &&
+            PhotoEffects.Next(PhotoEffect.KenBurns) == PhotoEffect.PunchIn &&
+            PhotoEffects.Next(PhotoEffect.PunchIn) == PhotoEffect.Fade &&
+            PhotoEffects.Next(PhotoEffect.Fade) == PhotoEffect.None);
+        Check("None se escribe ausente", PhotoEffects.ToFile(PhotoEffect.None) is null);
+        Check("desconocido, numero o null se leen None",
+            PhotoEffects.FromFile("Bogus") == PhotoEffect.None && PhotoEffects.FromFile("1") == PhotoEffect.None &&
+            PhotoEffects.FromFile(null) == PhotoEffect.None);
+        Check("el nombre se lee sin importar mayusculas", PhotoEffects.FromFile("kenburns") == PhotoEffect.KenBurns);
+        Check("Ken Burns sin slideshow dura 10 s", PhotoEffects.KenBurnsDuration(null) == TimeSpan.FromSeconds(10));
+        Check("con slideshow dura el intervalo", PhotoEffects.KenBurnsDuration(25) == TimeSpan.FromSeconds(25));
+
+        var con = SectorCon(@"D:\fotos\a.jpg", 0, 0, 100, false);
+        con.PhotoEffect = PhotoEffect.KenBurns;
+        var sin = SectorCon(@"D:\fotos\b.jpg", 0, 0, 100, false);
+        LayoutNode raiz = new SplitNode(SplitOrientation.Horizontal, con, sin);
+
+        var texto = BoardStore.Serialize([new TabData("Board 1", raiz)]);
+        Check("el efecto se escribe por nombre", texto.Contains("\"PhotoEffect\": \"KenBurns\""));
+        Check("None NO se escribe (archivos viejos comparan igual)", texto.Split("PhotoEffect").Length == 2);
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-efecto.mboard");
+        BoardStore.SaveTo(archivo, [new TabData("Board 1", raiz)], 0);
+        var leido = BoardStore.LoadFrom(archivo);
+        if (leido?.Tabs[0].Root is SplitNode { First: SectorNode a, Second: SectorNode b })
+        {
+            Check("vuelve con Ken Burns (aunque la foto este AUSENTE)", a.PhotoEffect == PhotoEffect.KenBurns);
+            Check("el otro vuelve sin efecto", b.PhotoEffect == PhotoEffect.None);
+            Check("releido sin tocar NO es un cambio", BoardStore.MatchesFile(archivo, leido.Tabs));
+            b.PhotoEffect = PhotoEffect.Fade;
+            Check("cambiar el efecto SI es un cambio", !BoardStore.MatchesFile(archivo, leido.Tabs));
+        }
+        else Check("la estructura leida es un split con dos sectores", false);
+
+        // Un v2 anterior a la feature, uno con "None" a mano y uno con un nombre desconocido: el
+        // mismo documento, ninguno se lee modificado.
+        var viejo = Path.Combine(Path.GetTempPath(), "probe-efecto-viejo.mboard");
+        foreach (var campo in new[] { "", ",\"PhotoEffect\":\"None\"", ",\"PhotoEffect\":\"Bogus\"" })
+        {
+            File.WriteAllText(viejo, """{"Version":2,"Tabs":[{"Name":"B","Root":{"Type":"sector","Path":"D:\\fotos\\v.jpg" """ + campo + "}}]}");
+            var l = BoardStore.LoadFrom(viejo);
+            Check($"sin efecto valido ({(campo.Length == 0 ? "sin campo" : campo.TrimStart(','))}) carga None y NO es un cambio",
+                l?.Tabs[0].Root is SectorNode { PhotoEffect: PhotoEffect.None } && BoardStore.MatchesFile(viejo, l.Tabs));
+        }
+
+        // Intercambiar y fijar viajan por MediaSnapshot: el efecto va con su foto.
+        var vm = new BoardViewModel();
+        vm.ReplaceRoot(raiz);
+        vm.SwapMedia(con, sin);
+        Check("intercambiar: el destino recibe el Ken Burns", sin.PhotoEffect == PhotoEffect.KenBurns && sin.MissingPath == @"D:\fotos\a.jpg");
+        Check("intercambiar: el origen recibe el sin efecto", con.PhotoEffect == PhotoEffect.None);
+        var dock = new PinnedDock();
+        var fijado = dock.Pin(vm, sin)!;
+        Check("fijar: el efecto viaja al panel", fijado.PhotoEffect == PhotoEffect.KenBurns);
+
+        fijado.Unload();
+        Check("vaciar el sector suelta el efecto (es de esa foto)", fijado.PhotoEffect == PhotoEffect.None);
+
+        File.Delete(archivo);
+        File.Delete(viejo);
+    }
+
+    private static void FondoDesenfocadoSoloConEfecto()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 26. FONDO DESENFOCADO: SOLO IMAGEN CON EFECTO, COPIA CHICA ===");
+
+        Check("imagen sin efecto: letterbox negro, SIN fondo",
+            !PhotoEffects.ShowsBackdrop(MediaKind.Image, PhotoEffect.None));
+        Check("imagen con cualquier efecto: CON fondo",
+            PhotoEffects.ShowsBackdrop(MediaKind.Image, PhotoEffect.KenBurns) &&
+            PhotoEffects.ShowsBackdrop(MediaKind.Image, PhotoEffect.PunchIn) &&
+            PhotoEffects.ShowsBackdrop(MediaKind.Image, PhotoEffect.Fade));
+        Check("video o vacio: nunca (el efecto es de fotos)",
+            !PhotoEffects.ShowsBackdrop(MediaKind.Video, PhotoEffect.KenBurns) &&
+            !PhotoEffects.ShowsBackdrop(MediaKind.None, PhotoEffect.KenBurns));
+
+        Check("6000x4000 baja a 96 de lado mayor",
+            Math.Abs(6000 * PhotoEffects.BackdropScale(6000, 4000) - PhotoEffects.BackdropPixels) < 0.001);
+        Check("vertical: manda el ALTO", Math.Abs(3000 * PhotoEffects.BackdropScale(1000, 3000) - PhotoEffects.BackdropPixels) < 0.001);
+        Check("una foto ya chica no se agranda", PhotoEffects.BackdropScale(50, 40) == 1.0);
+        Check("tamano invalido da 1", PhotoEffects.BackdropScale(0, 0) == 1.0);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

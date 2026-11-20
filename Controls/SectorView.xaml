@@ -39,8 +39,8 @@
                          sector. Se eligio la cabecera y no el area de video porque esa area es
                          un HWND hosteado: arrastrar desde ahi es poco confiable. Ademas evita
                          que un click cualquiera sobre el video se interprete como arrastre. -->
-                    <!-- El margen deja lugar a los OCHO botones de la derecha (22px cada uno). -->
-                    <StackPanel Orientation="Horizontal" Margin="0,0,186,0">
+                    <!-- El margen deja lugar a los NUEVE botones de la derecha (22px cada uno). -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,208,0">
                         <!-- Asa visible. Sin una pista de que la cabecera se arrastra, la
                              funcionalidad existe pero nadie la encuentra: una feature invisible
                              es una feature que no está. Solo aparece con media cargado, porque
@@ -85,6 +85,31 @@
                         <Button x:Name="ClearButton" Content="&#x23CF;" FontFamily="Segoe UI Symbol"
                                 ToolTip="Desvincular el media (el sector queda vacío)"
                                 Style="{DynamicResource IconButton}" />
+                        <!-- ══ Efecto de la foto (✨) ══
+                             Solo con una IMAGEN (lo colapsa SectorView.SyncPhotoEffect). Cada click
+                             pasa al efecto siguiente (Sin efecto → Ken Burns → Punch-in → Fundido) y
+                             lo reproduce en el acto: recorrer el ciclo ES la vista previa. "Apretado"
+                             mientras haya un efecto; el tooltip dice cuál. Ver Media/PhotoEffect.
+                             ⚠ U+2728 VERIFICADO con GlyphTypeface: existe en "Segoe UI Symbol" y NO
+                             en "Segoe UI" (TOFU). Template propio (como el 📌) para el "apretado". -->
+                        <Button x:Name="PhotoEffectButton" Content="&#x2728;" FontFamily="Segoe UI Symbol"
+                                Width="20" Height="18" Margin="2,0,0,0" FontSize="10" Cursor="Hand"
+                                Background="Transparent" Foreground="{DynamicResource DimTextBrush}"
+                                Visibility="Collapsed"
+                                AutomationProperties.AutomationId="PhotoEffectButton">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bg" Background="{TemplateBinding Background}" CornerRadius="3">
+                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bg" Property="Background" Value="#3A3A48" />
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
                         <!-- ══ Fijar en el panel lateral ══
                              Manda el media al PANEL FIJADO, que queda a la vista en todas las
                              pestañas (ver Board/PinnedDock). En un sector del panel el mismo botón
@@ -148,8 +173,37 @@
             <Grid Grid.Row="1" Background="Black">
                 <vlc:VideoView x:Name="Video" Visibility="Collapsed" />
 
-                <Image x:Name="Still" Stretch="Uniform" Visibility="Collapsed"
-                       Source="{Binding ImageSource}" />
+                <!-- ⚠ El marco RECORTA: el Ken Burns y el punch-in agrandan la imagen (RenderTransform),
+                     y sin recorte se desbordaría sobre la cabecera y el transporte. El recorte va en
+                     un padre y no en la Image: el Clip de un elemento se transforma CON su
+                     RenderTransform, así que en la Image misma no recortaría nada. Ni el
+                     RenderTransform ni la Opacity están bindeados (solo Source, OneWay): animarlos
+                     no pisa ningún binding. Ver SectorView.PlayPhotoEffect. -->
+                <Grid x:Name="StillFrame" ClipToBounds="True">
+                    <!-- Fondo desenfocado: la MISMA foto en "cubrir", borrosa y oscurecida, detrás de
+                         la foto. Solo con efecto (PhotoEffects.ShowsBackdrop): con Uniform la foto
+                         deja franjas, y el zoom/paneo mueve su borde; contra negro se ve, contra
+                         esto no. Es ESTÁTICO (solo la foto de adelante se anima). Source se pone
+                         desde código con una copia de ~96 px (ver SyncBackdrop): no está bindeado.
+                         ⚠ CacheMode va en el PADRE del blur: así el resultado YA desenfocado queda
+                         en caché y la animación de adelante no lo recalcula en cada cuadro.
+                         Margin negativo: el blur se desvanece en los bordes del elemento; que esos
+                         bordes caigan fuera del recorte. -->
+                    <Border x:Name="BackdropHost" Margin="-24" Visibility="Collapsed" Opacity="0.55">
+                        <Border.CacheMode>
+                            <BitmapCache />
+                        </Border.CacheMode>
+                        <Image x:Name="Backdrop" Stretch="UniformToFill"
+                               RenderOptions.BitmapScalingMode="Linear">
+                            <Image.Effect>
+                                <BlurEffect Radius="14" KernelType="Gaussian" RenderingBias="Performance" />
+                            </Image.Effect>
+                        </Image>
+                    </Border>
+                    <Image x:Name="Still" Stretch="Uniform" Visibility="Collapsed"
+                           RenderTransformOrigin="0.5,0.5"
+                           Source="{Binding ImageSource}" />
+                </Grid>
 
                 <!-- Estado vacío: no es decoración, es la única pista de CÓMO se usa la app. -->
                 <Border x:Name="EmptyHint" BorderThickness="1.5" CornerRadius="4" Margin="10"

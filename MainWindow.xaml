@@ -59,6 +59,64 @@
                         </TextBlock>
                     </Button>
 
+                    <!-- ══ Slideshow ══
+                         Recorre las pestañas en orden cada N segundos, dando la vuelta. Lo para el
+                         mismo botón, Esc, o cualquier cambio de pestaña a mano. Ver la región
+                         "Slideshow" de MainWindow y Board/Slideshow.
+                         ⚠ Button y NO ToggleButton: el estado lo decide el código (Esc y los cambios
+                         manuales lo apagan), y un toggle se da vuelta solo al click. El "apretado"
+                         lo pinta Tag="on" (lo pone MainWindow.SyncSlideshowUi).
+                         ⚠ ▶ (U+25B6) y ⏸ (U+23F8) VERIFICADOS con GlyphTypeface: existen en "Segoe
+                         UI Symbol" y NO en "Segoe UI" → van en su propio Run para no salir TOFU. -->
+                    <Button x:Name="SlideshowButton" Height="26" Padding="12,0" Margin="0,0,6,0"
+                            Foreground="{StaticResource TextBrush}" FontSize="11" Cursor="Hand"
+                            AutomationProperties.AutomationId="SlideshowButton"
+                            AutomationProperties.Name="Arrancar slideshow"
+                            ToolTip="Ctrl+P — recorre las pestañas cada N segundos. Lo detienen el botón, Esc o cambiar de pestaña a mano">
+                        <Button.Template>
+                            <ControlTemplate TargetType="Button">
+                                <Border x:Name="Bg" Background="#2A2A34" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Bg" Property="Background" Value="#3A3A48" />
+                                    </Trigger>
+                                    <Trigger Property="Tag" Value="on">
+                                        <Setter TargetName="Bg" Property="Background" Value="{StaticResource AccentBrush}" />
+                                        <Setter Property="Foreground" Value="#0E1620" />
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Button.Template>
+                        <TextBlock>
+                            <Run x:Name="SlideshowGlyph" Text="&#x25B6;" FontFamily="Segoe UI Symbol" /><Run x:Name="SlideshowLabel" Text=" Slideshow" />
+                        </TextBlock>
+                    </Button>
+                    <!-- Cuenta regresiva hasta la próxima pestaña. Solo con el slideshow corriendo.
+                         Ancho fijo: si bailara con "10s" → "9s", empujaría la barra en cada segundo. -->
+                    <TextBlock x:Name="SlideshowCountdown" Width="34" Visibility="Collapsed"
+                               VerticalAlignment="Center" FontFamily="Consolas" FontSize="11"
+                               Foreground="{StaticResource AccentBrush}"
+                               AutomationProperties.AutomationId="SlideshowCountdown" />
+                    <!-- Intervalo en segundos (2–3600, por defecto 10), UNO para todo el documento.
+                         Se guarda en el .mboard (solo si ≠ 10). Enter / click afuera confirma; Esc
+                         descarta; basura vuelve al valor anterior. Ver Slideshow.TryParse. -->
+                    <TextBox x:Name="SlideshowIntervalBox" Width="40" Height="22" VerticalAlignment="Center"
+                             VerticalContentAlignment="Center" HorizontalContentAlignment="Right"
+                             FontSize="11" FontFamily="Consolas" Padding="2,0" MaxLength="5"
+                             Background="{StaticResource WindowBrush}"
+                             Foreground="{StaticResource TextBrush}"
+                             CaretBrush="{StaticResource TextBrush}"
+                             BorderBrush="#2E2E3A" BorderThickness="1"
+                             AutomationProperties.AutomationId="SlideshowInterval"
+                             AutomationProperties.Name="Intervalo del slideshow en segundos"
+                             ToolTip="Segundos por pestaña (2 a 3600)"
+                             KeyDown="OnSlideshowIntervalKeyDown"
+                             LostKeyboardFocus="OnSlideshowIntervalLostFocus" />
+                    <TextBlock Text="s" Margin="3,0,0,0" FontSize="11" VerticalAlignment="Center"
+                               Foreground="{StaticResource DimTextBrush}" />
+
                     <Border Width="1" Background="#2E2E3A" Margin="8,2,8,2" />
 
                     <!-- ══ Volumen general del board ══

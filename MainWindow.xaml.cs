@@ -78,6 +78,14 @@ public partial class MainWindow : Window
 
     private DockData? CurrentDock() => _dock.ToData();
 
+    /// <summary>
+    /// El documento en la forma de COMPARAR (sin pestaña activa). Un solo lugar que junta todo lo
+    /// que el archivo guarda —pestañas, panel, intervalo del slideshow—: si cada comparación
+    /// armara su propia lista, alcanzaría con que una se olvide de un campo para que la "•" mienta.
+    /// </summary>
+    private string SerializeDocument() =>
+        BoardStore.Serialize(CurrentTabs(), CurrentDock(), null, _slideshowSeconds);
+
     /// <param name="startupFile">
     /// El archivo a abrir al arrancar: viene del doble click en Explorer (el shell nos pasa el
     /// path como argumento). Si no hay ninguno, la app arranca con un documento VACÍO.
@@ -115,6 +123,7 @@ public partial class MainWindow : Window
         SaveAsButton.Click += (_, _) => SaveAs();
         DistributeButton.Click += (_, _) => Board.Distribute();
         RunOnceButton.Click += (_, _) => RunAllOnce();
+        SlideshowButton.Click += (_, _) => ToggleSlideshow();
         HelpList.ItemsSource = ShortcutHelp;
         AssociateButton.Click += (_, _) => Associate();
 
@@ -188,8 +197,11 @@ public partial class MainWindow : Window
         _active = null;
         SwitchTo(AddTab(BoardTab.NextDefaultName([])));
 
+        // El intervalo es del documento: "Nuevo" vuelve al de por defecto.
+        SetSlideshowSeconds(Slideshow.DefaultSeconds);
+
         _filePath = null;
-        _savedSnapshot = BoardStore.Serialize(CurrentTabs(), CurrentDock());
+        _savedSnapshot = SerializeDocument();
         foreach (var tab in _tabs) tab.SavedSnapshot = BoardStore.SerializeTab(tab.ToData());
         RefreshModified();
     }
@@ -203,7 +215,7 @@ public partial class MainWindow : Window
     {
         _filePath = path;
         var snapshot = BoardStore.ReadSnapshot(path);
-        _savedSnapshot = snapshot?.Document ?? BoardStore.Serialize(CurrentTabs(), CurrentDock());
+        _savedSnapshot = snapshot?.Document ?? SerializeDocument();
         for (var i = 0; i < _tabs.Count; i++)
             _tabs[i].SavedSnapshot = snapshot is not null && i < snapshot.Tabs.Count ? snapshot.Tabs[i] : null;
         RefreshModified();
@@ -212,7 +224,7 @@ public partial class MainWindow : Window
     private void RefreshModified()
     {
         foreach (var tab in _tabs) tab.RefreshModified();
-        _isModified = BoardStore.Serialize(CurrentTabs(), CurrentDock()) != _savedSnapshot;
+        _isModified = SerializeDocument() != _savedSnapshot;
         UpdateTitle();
 
         // ⏏ sobre el último sector del panel lo vacía sin pasar por ningún evento de layout:
@@ -229,8 +241,8 @@ public partial class MainWindow : Window
     /// </summary>
     private bool HasUnsavedWork() =>
         _filePath is null
-            ? BoardStore.Serialize(CurrentTabs(), CurrentDock()) != _savedSnapshot
-            : !BoardStore.MatchesFile(_filePath, CurrentTabs(), CurrentDock());
+            ? SerializeDocument() != _savedSnapshot
+            : !BoardStore.MatchesFile(_filePath, CurrentTabs(), CurrentDock(), _slideshowSeconds);
 
     /// <summary>
     /// Pregunta UNA vez, por el archivo entero, antes de perder trabajo. Devuelve false si el
@@ -300,9 +312,16 @@ public partial class MainWindow : Window
     /// la saliente se pausa y se colapsa, la entrante se hace visible y reanuda lo que estaba
     /// reproduciendo. Ningún archivo se reabre. Ver BoardTab.Activate/Deactivate.
     /// </summary>
-    private void SwitchTo(BoardTab tab)
+    /// <param name="bySlideshow">
+    /// true SOLO desde el temporizador del slideshow. Cualquier OTRO cambio de pestaña (click,
+    /// Ctrl+Tab, Ctrl+1…9, Ctrl+T/W, arrastrar, Nuevo/Abrir) es manual y lo DETIENE: se cuelga
+    /// acá, del único camino de activación, para que ningún gesto nuevo se olvide de pararlo.
+    /// Volver a clickear la pestaña que ya está activa no es un cambio y no lo para.
+    /// </param>
+    private void SwitchTo(BoardTab tab, bool bySlideshow = false)
     {
         if (ReferenceEquals(_active, tab)) return;
+        if (!bySlideshow) StopSlideshow();
 
         var clock = DiagLog.Enabled ? System.Diagnostics.Stopwatch.StartNew() : null;
 
@@ -395,6 +414,161 @@ public partial class MainWindow : Window
         if (_tabDrag is { Active: true }) return;
         if ((sender as FrameworkElement)?.DataContext is BoardTab tab && _tabs.Contains(tab)) CloseTab(tab);
     }
+
+    #endregion
+
+    #region Slideshow (▶ en la barra / Ctrl+P)
+
+    /// <summary>
+    /// Intervalo del slideshow, del DOCUMENTO (se guarda en el `.mboard` solo si ≠ 10, ver
+    /// Slideshow.SecondsOrNull). Cambiarlo es un cambio sin guardar como cualquier otro: lo ve la
+    /// comparación contra el archivo (SerializeDocument), no un flag.
+    /// </summary>
+    private int _slideshowSeconds = Slideshow.DefaultSeconds;
+
+    /// <summary>
+    /// Corriendo o no. ⚠ Estado de RUNTIME: no viaja al archivo ni cuenta como cambio sin
+    /// guardar (mirar un slideshow es mirar, como cambiar de pestaña).
+    /// </summary>
+    private bool _slideshowRunning;
+
+    /// <summary>Cuándo toca la próxima pestaña, en Environment.TickCount64 (reloj de pared, sin saltos).</summary>
+    private long _slideshowDeadline;
+
+    /// <summary>
+    /// UN timer que hace las dos cosas: refresca la cuenta regresiva y, al llegar a cero, cambia
+    /// de pestaña. 200 ms alcanza para que el "7s" no se atrase a ojo, y el cambio se decide
+    /// contra el deadline (no contando ticks): un tick demorado no estira el intervalo.
+    /// Prioridad Normal: Background lo dejaría morir de hambre mientras VLC decodifica.
+    /// </summary>
+    private DispatcherTimer? _slideshowTimer;
+
+    private void ToggleSlideshow()
+    {
+        if (_slideshowRunning) StopSlideshow();
+        else StartSlideshow();
+    }
+
+    private void StartSlideshow()
+    {
+        // Un intervalo a medio tipear se confirma primero: arrancar con el valor viejo y que el
+        // campo diga otro sería mentirle al que acaba de escribirlo.
+        CommitSlideshowInterval();
+
+        if (_slideshowTimer is null)
+        {
+            _slideshowTimer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = TimeSpan.FromMilliseconds(200) };
+            _slideshowTimer.Tick += (_, _) => OnSlideshowTick();
+        }
+
+        _slideshowRunning = true;
+        // ANTES del primer cambio: el Ken Burns de cada pestaña que entra dura el intervalo.
+        AmpzMediaBoard.Controls.SectorView.SlideshowIntervalSeconds = _slideshowSeconds;
+        DiagLog.Write($"slideshow start {_slideshowSeconds}");
+        RestartSlideshowCountdown();
+        _slideshowTimer.Start();
+        SyncSlideshowUi();
+    }
+
+    private void StopSlideshow()
+    {
+        if (!_slideshowRunning) return;
+        _slideshowRunning = false;
+        _slideshowTimer?.Stop();
+        AmpzMediaBoard.Controls.SectorView.SlideshowIntervalSeconds = null;
+        DiagLog.Write("slideshow stop");
+        SyncSlideshowUi();
+    }
+
+    private void RestartSlideshowCountdown() =>
+        _slideshowDeadline = Environment.TickCount64 + _slideshowSeconds * 1000L;
+
+    private void OnSlideshowTick()
+    {
+        if (!_slideshowRunning) return;
+
+        var remaining = _slideshowDeadline - Environment.TickCount64;
+        if (remaining <= 0)
+        {
+            // Arrastrando o renombrando una pestaña, el cambio se POSTERGA una vuelta entera:
+            // cambiar de pestaña por debajo de un arrastre activa otra que no es la que tenés en
+            // la mano, y con la caja de renombrar abierta dejaría el texto sin confirmar en una
+            // pestaña que ya no se ve. No se detiene: soltar o confirmar y sigue solo.
+            if (_tabDrag is not { Active: true } && _renameBox is null && _tabs.Count > 1)
+            {
+                var next = _tabs[Slideshow.NextIndex(_tabs.IndexOf(_active!), _tabs.Count)];
+                DiagLog.Write($"slideshow next {_tabs.IndexOf(next)}");
+                SwitchTo(next, bySlideshow: true);
+            }
+            RestartSlideshowCountdown();
+            remaining = _slideshowDeadline - Environment.TickCount64;
+        }
+
+        SlideshowCountdown.Text = Slideshow.CountdownText(remaining);
+    }
+
+    /// <summary>
+    /// Pinta botón y cuenta regresiva. El botón NO es un ToggleButton: el estado lo decide este
+    /// código (lo paran Esc y los cambios manuales), y un toggle que se da vuelta solo al click
+    /// tendría que pelear con eso. Mismo criterio que el ⇄ del sector.
+    /// </summary>
+    private void SyncSlideshowUi()
+    {
+        SlideshowGlyph.Text = _slideshowRunning ? "⏸" : "▶";
+        SlideshowLabel.Text = _slideshowRunning ? " Detener" : " Slideshow";
+        SlideshowButton.Tag = _slideshowRunning ? "on" : null;
+        System.Windows.Automation.AutomationProperties.SetName(SlideshowButton, _slideshowRunning ? "Detener slideshow" : "Arrancar slideshow");
+        SlideshowCountdown.Visibility = _slideshowRunning ? Visibility.Visible : Visibility.Collapsed;
+        if (_slideshowRunning) SlideshowCountdown.Text = Slideshow.CountdownText(_slideshowDeadline - Environment.TickCount64);
+    }
+
+    /// <summary>
+    /// Fija el intervalo (abrir un archivo, "Nuevo", o el campo confirmado) y lo refleja en el
+    /// campo. Con el slideshow corriendo, la cuenta arranca de nuevo con el valor nuevo: seguir
+    /// contando el viejo haría que el cambio "no ande" hasta la próxima vuelta.
+    /// </summary>
+    private void SetSlideshowSeconds(int seconds)
+    {
+        var clamped = Slideshow.Clamp(seconds);
+        var changed = clamped != _slideshowSeconds;
+        _slideshowSeconds = clamped;
+        SlideshowIntervalBox.Text = clamped.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (changed && _slideshowRunning)
+        {
+            AmpzMediaBoard.Controls.SectorView.SlideshowIntervalSeconds = clamped;
+            RestartSlideshowCountdown();
+            SyncSlideshowUi();
+        }
+    }
+
+    /// <summary>
+    /// Confirma lo tipeado en el campo. Basura (vacío, letras) vuelve al valor que había, igual
+    /// que el renombre de pestaña con un nombre vacío: confirmar basura casi siempre es un accidente.
+    /// </summary>
+    private void CommitSlideshowInterval()
+    {
+        SetSlideshowSeconds(Slideshow.TryParse(SlideshowIntervalBox.Text, out var seconds) ? seconds : _slideshowSeconds);
+        RefreshModified();
+    }
+
+    private void OnSlideshowIntervalKeyDown(object sender, KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.Enter:
+                CommitSlideshowInterval();
+                FocusBoard();
+                e.Handled = true;
+                break;
+            case Key.Escape:
+                SetSlideshowSeconds(_slideshowSeconds);   // descarta lo tipeado
+                FocusBoard();
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void OnSlideshowIntervalLostFocus(object sender, KeyboardFocusChangedEventArgs e) => CommitSlideshowInterval();
 
     #endregion
 
@@ -815,6 +989,16 @@ public partial class MainWindow : Window
     /// </summary>
     private void OnWindowPreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        // El campo del intervalo del slideshow tiene el MISMO problema (un click en algo no
+        // enfocable no le saca el foco): un click afuera confirma y devuelve el foco al board,
+        // si no el Espacio siguiente se escribiría en el campo en vez de dar play.
+        if (SlideshowIntervalBox.IsKeyboardFocusWithin &&
+            !(e.OriginalSource is DependencyObject clicked && ReferenceEquals(FindAncestor<TextBox>(clicked), SlideshowIntervalBox)))
+        {
+            CommitSlideshowInterval();
+            FocusBoard();
+        }
+
         if (_renameBox is null) return;
         if (e.OriginalSource is DependencyObject source && ReferenceEquals(FindAncestor<TextBox>(source), _renameBox)) return;
         CommitPendingRename();
@@ -969,6 +1153,9 @@ public partial class MainWindow : Window
         }
 
         ReplaceDocument(document.Tabs, document.ActiveTab, document.Dock);
+        // ANTES de MarkSaved: si el archivo no se pudiera releer, la foto sale de serializar la
+        // memoria, y tiene que incluir el intervalo que trajo el archivo.
+        SetSlideshowSeconds(document.SlideshowSeconds);
         MarkSaved(full);
     }
 
@@ -1000,7 +1187,7 @@ public partial class MainWindow : Window
 
     private bool Write(string path)
     {
-        var error = BoardStore.SaveTo(path, CurrentTabs(), _tabs.IndexOf(_active!), CurrentDock());
+        var error = BoardStore.SaveTo(path, CurrentTabs(), _tabs.IndexOf(_active!), CurrentDock(), _slideshowSeconds);
         if (error is not null)
         {
             // Un "guardar" que falla en silencio es la peor mentira que le podés decir al usuario:
@@ -1147,6 +1334,7 @@ public partial class MainWindow : Window
         new("Ctrl+V", "Cargar el archivo del portapapeles"),
         new("Ctrl+R", "Correr todo una vez (A→B, todos juntos)"),
         new("Ctrl+E", "Distribuir"),
+        new("Ctrl+P", "Slideshow: recorrer las pestañas (Esc o cambiar de pestaña lo detiene)"),
         new("Ctrl+T / Ctrl+W", "Agregar / quitar pestaña"),
         new("Ctrl+Tab", "Pestaña siguiente (Shift: anterior)"),
         new("Ctrl+1…9", "Ir a la pestaña N (9 = última)"),
@@ -1200,6 +1388,7 @@ public partial class MainWindow : Window
         TopBar.Visibility = Visibility.Collapsed;
         TabStrip.Visibility = Visibility.Collapsed;
         _pantallaCompleta = true;
+        ReplayPhotoEffectsAfterLayout();
     }
 
     private void SalirDePantallaCompleta()
@@ -1216,7 +1405,17 @@ public partial class MainWindow : Window
         TopBar.Visibility = Visibility.Visible;
         TabStrip.Visibility = Visibility.Visible;
         _pantallaCompleta = false;
+        ReplayPhotoEffectsAfterLayout();
     }
+
+    /// <summary>
+    /// Al entrar/salir de pantalla completa la foto no cambia de visibilidad (solo de tamaño), así
+    /// que su efecto no se re-dispara solo: se pide acá, para pestaña activa y panel fijado. Con
+    /// prioridad Loaded: recién después del re-layout al tamaño nuevo, para que el efecto arranque
+    /// sobre el cuadro que el usuario va a ver. La animación vive en SectorView (capa de render).
+    /// </summary>
+    private void ReplayPhotoEffectsAfterLayout() =>
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => Controls.SectorView.ReplayPhotoEffects(this));
 
     #endregion
 
@@ -1310,6 +1509,12 @@ public partial class MainWindow : Window
                     RunAllOnce();
                     e.Handled = true;
                     return;
+
+                // Slideshow: recorre las pestañas. También del documento entero, antes del guard.
+                case Key.P:
+                    ToggleSlideshow();
+                    e.Handled = true;
+                    return;
             }
         }
 
@@ -1323,6 +1528,15 @@ public partial class MainWindow : Window
             case Key.Escape when Board.Expanded is not null || _dock.Board.Expanded is not null:
                 Board.CollapseExpand();
                 _dock.Board.CollapseExpand();
+                e.Handled = true;
+                return;
+
+            // Después de la expansión y ANTES que pantalla completa: el uso típico es F11 + Ctrl+P
+            // (mirar las pestañas pasar a pantalla completa). El primer Esc corta el slideshow y te
+            // deja mirando la pestaña donde estabas, todavía en pantalla completa; el siguiente
+            // sale. Un Esc que hiciera las dos cosas te sacaría de golpe de lo que estabas mirando.
+            case Key.Escape when _slideshowRunning:
+                StopSlideshow();
                 e.Handled = true;
                 return;
 
