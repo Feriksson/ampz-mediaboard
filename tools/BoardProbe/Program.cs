@@ -43,6 +43,7 @@ internal static class Program
         CorrerUnaVezEsDeTiempoDeEjecucion();
         SlideshowRecorreYGuardaSoloElIntervalo();
         EfectoDeFotoSeGuardaYViaja();
+        FondoDesenfocadoSoloConEfecto();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -1035,6 +1036,28 @@ internal static class Program
 
         File.Delete(archivo);
         File.Delete(viejo);
+    }
+
+    private static void FondoDesenfocadoSoloConEfecto()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 26. FONDO DESENFOCADO: SOLO IMAGEN CON EFECTO, COPIA CHICA ===");
+
+        Check("imagen sin efecto: letterbox negro, SIN fondo",
+            !PhotoEffects.ShowsBackdrop(MediaKind.Image, PhotoEffect.None));
+        Check("imagen con cualquier efecto: CON fondo",
+            PhotoEffects.ShowsBackdrop(MediaKind.Image, PhotoEffect.KenBurns) &&
+            PhotoEffects.ShowsBackdrop(MediaKind.Image, PhotoEffect.PunchIn) &&
+            PhotoEffects.ShowsBackdrop(MediaKind.Image, PhotoEffect.Fade));
+        Check("video o vacio: nunca (el efecto es de fotos)",
+            !PhotoEffects.ShowsBackdrop(MediaKind.Video, PhotoEffect.KenBurns) &&
+            !PhotoEffects.ShowsBackdrop(MediaKind.None, PhotoEffect.KenBurns));
+
+        Check("6000x4000 baja a 96 de lado mayor",
+            Math.Abs(6000 * PhotoEffects.BackdropScale(6000, 4000) - PhotoEffects.BackdropPixels) < 0.001);
+        Check("vertical: manda el ALTO", Math.Abs(3000 * PhotoEffects.BackdropScale(1000, 3000) - PhotoEffects.BackdropPixels) < 0.001);
+        Check("una foto ya chica no se agranda", PhotoEffects.BackdropScale(50, 40) == 1.0);
+        Check("tamano invalido da 1", PhotoEffects.BackdropScale(0, 0) == 1.0);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

@@ -5,6 +5,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using AmpzMediaBoard.Board;
 using AmpzMediaBoard.Layout;
@@ -711,6 +712,81 @@ public partial class SectorView : UserControl
         System.Windows.Automation.AutomationProperties.SetName(PhotoEffectButton, $"Efecto de la foto: {PhotoEffects.Label(effect)}");
         PhotoEffectButton.Background = effect != PhotoEffect.None ? PinnedFill : Brushes.Transparent;
         PhotoEffectButton.SetResourceReference(ForegroundProperty, effect != PhotoEffect.None ? "AccentBrush" : "DimTextBrush");
+        SyncBackdrop();
+    }
+
+    /// <summary>Foto de la que salió la copia chica del fondo: para no re-escalarla en cada Sync.</summary>
+    private BitmapSource? _backdropFor;
+    private BitmapSource? _backdropSmall;
+
+    /// <summary>
+    /// El fondo desenfocado (ver el XAML): visible solo con imagen + efecto. La copia chica se
+    /// hace UNA vez por foto y se congela: estirada a todo el sector con un blur moderado cuesta
+    /// poco, y como el padre tiene BitmapCache el desenfoque no se recalcula mientras la foto de
+    /// adelante se anima. Bajar una foto de 24 MP lleva algunos ms: por eso el caché por foto, y
+    /// no por efecto (recorrer el ✨ no la vuelve a escalar).
+    /// </summary>
+    private void SyncBackdrop()
+    {
+        var source = _node?.ImageSource;
+        var show = source is not null && PhotoEffects.ShowsBackdrop(_node!.Kind, _node.PhotoEffect);
+
+        if (!ReferenceEquals(source, _backdropFor))
+        {
+            _backdropFor = source;
+            _backdropSmall = null;
+        }
+
+        if (show && _backdropSmall is null && source is not null)
+        {
+            try
+            {
+                var scale = PhotoEffects.BackdropScale(source.PixelWidth, source.PixelHeight);
+                BitmapSource small = scale >= 1.0
+                    ? source
+                    // CachedBitmap OnLoad materializa los píxeles chicos YA: un TransformedBitmap
+                    // suelto puede re-leer la foto grande cada vez que WPF lo realiza.
+                    : new CachedBitmap(new TransformedBitmap(source, new ScaleTransform(scale, scale)),
+                        BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                if (small.CanFreeze && !small.IsFrozen) small.Freeze();
+                _backdropSmall = small;
+            }
+            catch (Exception ex)
+            {
+                // Un formato raro que WIC no reescala: sin fondo (letterbox negro), nunca tumbar la vista.
+                DiagLog.Write($"backdrop error: {ex.Message}");
+                _backdropSmall = null;
+            }
+        }
+
+        show &= _backdropSmall is not null;
+        // Source no está bindeado en el Backdrop (solo en Still): asignarlo en código es seguro.
+        Backdrop.Source = show ? _backdropSmall : null;
+        BackdropHost.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// Re-dispara el efecto en cada foto VISIBLE bajo <paramref name="root"/> (pestaña activa y
+    /// panel fijado). Lo llama MainWindow al entrar/salir de pantalla completa: ahí la foto no
+    /// cambia de visibilidad, así que IsVisibleChanged no dispara, y el usuario espera ver el
+    /// efecto en el tamaño nuevo. Recorre el árbol visual en vez de suscribir cada vista a un
+    /// evento estático: un evento estático retendría las vistas viejas de cada Rebuild.
+    /// </summary>
+    public static void ReplayPhotoEffects(DependencyObject root)
+    {
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is SectorView view)
+            {
+                if (view.Still.IsVisible) view.PlayPhotoEffect();
+                continue; // un sector no tiene sectores adentro
+            }
+            // Una pestaña de fondo está Collapsed: no hay nada visible que re-disparar abajo.
+            if (child is UIElement { Visibility: not Visibility.Visible }) continue;
+            ReplayPhotoEffects(child);
+        }
     }
 
     /// <summary>
@@ -730,19 +806,31 @@ public partial class SectorView : UserControl
             {
                 // Lineal a propósito: con easing "frena" al final y se lee como que terminó;
                 // lineal se lee como un movimiento de cámara continuo.
+                // REPITE mientras se ve: acerca, aleja, acerca... (AutoReverse + Forever). Una sola
+                // pasada con HoldEnd dejaba la foto quieta a los 10 s y parecía que el efecto no
+                // andaba (sobre todo al pasar a pantalla completa). Con el slideshow corriendo, UN
+                // tramo (la ida) sigue durando el intervalo: el zoom de ida termina cuando cambia la
+                // pestaña, como antes.
                 var duration = new Duration(PhotoEffects.KenBurnsDuration(SlideshowIntervalSeconds));
-                Animate(_stillScale, ScaleTransform.ScaleXProperty, 1.0, PhotoEffects.KenBurnsEndScale, duration, null);
-                Animate(_stillScale, ScaleTransform.ScaleYProperty, 1.0, PhotoEffects.KenBurnsEndScale, duration, null);
+                Animate(_stillScale, ScaleTransform.ScaleXProperty, 1.0, PhotoEffects.KenBurnsEndScale, duration, null, repeat: true);
+                Animate(_stillScale, ScaleTransform.ScaleYProperty, 1.0, PhotoEffects.KenBurnsEndScale, duration, null, repeat: true);
 
                 // Paneo leve moviendo el ORIGEN del zoom (RenderTransformOrigin, relativo 0..1) y
-                // no con un TranslateTransform en píxeles: (1) no depende de ActualWidth, que en
-                // una pestaña recién activada todavía vale 0 (el layout no corrió), y (2) con el
-                // origen dentro de [0,1] y la escala ≥ 1 el borde de la foto NUNCA entra al cuadro.
-                // Desplazamiento visible al final: 0,12 × 0,2 ≈ 2,4% del ancho. La diagonal alterna.
+                // no con un TranslateTransform en píxeles: no depende de ActualWidth, que en una
+                // pestaña recién activada todavía vale 0 (el layout no corrió). Con el origen en
+                // [0,1] y la escala ≥ 1 el borde del ELEMENTO no entra al cuadro, pero el de la
+                // FOTO sí puede: con Stretch=Uniform y otra proporción que el sector, la foto deja
+                // franjas y su borde se agranda y se corre con ella. Eso lo tapa el fondo
+                // desenfocado (SyncBackdrop), no esta cuenta. Desplazamiento visible al final:
+                // 0,12 × 0,2 ≈ 2,4% del ancho. La diagonal alterna; la vuelta desanda el mismo camino.
                 var turn = _kenBurnsTurn++;
                 var to = new Point(0.5 + (turn % 2 == 0 ? 0.2 : -0.2), 0.5 + (turn / 2 % 2 == 0 ? 0.15 : -0.15));
                 Still.BeginAnimation(RenderTransformOriginProperty,
-                    new PointAnimation(new Point(0.5, 0.5), to, duration) { FillBehavior = FillBehavior.HoldEnd });
+                    new PointAnimation(new Point(0.5, 0.5), to, duration)
+                    {
+                        AutoReverse = true,
+                        RepeatBehavior = RepeatBehavior.Forever,
+                    });
                 break;
             }
             case PhotoEffect.PunchIn:
@@ -769,13 +857,19 @@ public partial class SectorView : UserControl
         Still.BeginAnimation(OpacityProperty, null);
     }
 
-    /// <summary>HoldEnd: el Ken Burns se queda en su último cuadro hasta el próximo disparo, no salta atrás.</summary>
+    /// <summary>
+    /// HoldEnd: un efecto de una pasada (punch-in, fundido) se queda en su último cuadro, no salta
+    /// atrás. <paramref name="repeat"/>: ida y vuelta para siempre (Ken Burns); se suelta en
+    /// ResetPhotoEffect, al esconderse la foto, así que no corre en pestañas de fondo.
+    /// </summary>
     private static void Animate(IAnimatable target, DependencyProperty property,
-        double from, double to, Duration duration, IEasingFunction? ease) =>
+        double from, double to, Duration duration, IEasingFunction? ease, bool repeat = false) =>
         target.BeginAnimation(property, new DoubleAnimation(from, to, duration)
         {
             EasingFunction = ease,
             FillBehavior = FillBehavior.HoldEnd,
+            AutoReverse = repeat,
+            RepeatBehavior = repeat ? RepeatBehavior.Forever : new RepeatBehavior(1),
         });
 
     #endregion

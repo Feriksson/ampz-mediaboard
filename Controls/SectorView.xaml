@@ -179,11 +179,31 @@
                      RenderTransform, así que en la Image misma no recortaría nada. Ni el
                      RenderTransform ni la Opacity están bindeados (solo Source, OneWay): animarlos
                      no pisa ningún binding. Ver SectorView.PlayPhotoEffect. -->
-                <Border x:Name="StillFrame" ClipToBounds="True">
+                <Grid x:Name="StillFrame" ClipToBounds="True">
+                    <!-- Fondo desenfocado: la MISMA foto en "cubrir", borrosa y oscurecida, detrás de
+                         la foto. Solo con efecto (PhotoEffects.ShowsBackdrop): con Uniform la foto
+                         deja franjas, y el zoom/paneo mueve su borde; contra negro se ve, contra
+                         esto no. Es ESTÁTICO (solo la foto de adelante se anima). Source se pone
+                         desde código con una copia de ~96 px (ver SyncBackdrop): no está bindeado.
+                         ⚠ CacheMode va en el PADRE del blur: así el resultado YA desenfocado queda
+                         en caché y la animación de adelante no lo recalcula en cada cuadro.
+                         Margin negativo: el blur se desvanece en los bordes del elemento; que esos
+                         bordes caigan fuera del recorte. -->
+                    <Border x:Name="BackdropHost" Margin="-24" Visibility="Collapsed" Opacity="0.55">
+                        <Border.CacheMode>
+                            <BitmapCache />
+                        </Border.CacheMode>
+                        <Image x:Name="Backdrop" Stretch="UniformToFill"
+                               RenderOptions.BitmapScalingMode="Linear">
+                            <Image.Effect>
+                                <BlurEffect Radius="14" KernelType="Gaussian" RenderingBias="Performance" />
+                            </Image.Effect>
+                        </Image>
+                    </Border>
                     <Image x:Name="Still" Stretch="Uniform" Visibility="Collapsed"
                            RenderTransformOrigin="0.5,0.5"
                            Source="{Binding ImageSource}" />
-                </Border>
+                </Grid>
 
                 <!-- Estado vacío: no es decoración, es la única pista de CÓMO se usa la app. -->
                 <Border x:Name="EmptyHint" BorderThickness="1.5" CornerRadius="4" Margin="10"

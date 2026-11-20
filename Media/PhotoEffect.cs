@@ -11,7 +11,7 @@ public enum PhotoEffect
 {
     None,
 
-    /// <summary>Zoom lento 100%→112% con un paneo leve, a lo largo de todo el intervalo.</summary>
+    /// <summary>Zoom lento 100%→112% con un paneo leve, ida y vuelta mientras se ve (un tramo = el intervalo).</summary>
     KenBurns,
 
     /// <summary>Entra de 108%→100% con fundido, ~600 ms: un "golpe" al aparecer.</summary>
@@ -77,4 +77,31 @@ public static class PhotoEffects
     /// </summary>
     public static TimeSpan KenBurnsDuration(int? slideshowSeconds) =>
         TimeSpan.FromSeconds(slideshowSeconds is { } s && s > 0 ? s : KenBurnsDefaultSeconds);
+
+    /// <summary>
+    /// Lado mayor (px) de la copia chica de la foto que hace de fondo desenfocado. Chica a
+    /// propósito: estirada hasta llenar el sector, el propio reescalado ya la deja borrosa, y el
+    /// BlurEffect de encima puede ser de radio moderado. Un radio grande sobre la foto a resolución
+    /// completa, ×8 sectores en pantalla completa, es justo lo que no queremos pagar.
+    /// </summary>
+    public const int BackdropPixels = 96;
+
+    /// <summary>
+    /// El fondo desenfocado (la misma foto en "cubrir", detrás) aparece SOLO en una imagen con
+    /// efecto. Sin efecto queda el letterbox negro de siempre: es una herramienta de estudio y la
+    /// foto se ve tal cual es. Con efecto, el zoom/paneo mueve el borde de la foto y contra negro
+    /// ese borde se lee como un error; contra la misma foto borrosa, como una composición.
+    /// </summary>
+    public static bool ShowsBackdrop(MediaKind kind, PhotoEffect effect) =>
+        kind == MediaKind.Image && effect != PhotoEffect.None;
+
+    /// <summary>
+    /// Escala para bajar la foto a <see cref="BackdropPixels"/> de lado mayor. Nunca agranda (una
+    /// foto ya chica se usa tal cual: agrandarla solo gasta memoria) y un tamaño inválido da 1.
+    /// </summary>
+    public static double BackdropScale(int pixelWidth, int pixelHeight)
+    {
+        var mayor = Math.Max(pixelWidth, pixelHeight);
+        return mayor <= BackdropPixels ? 1.0 : (double)BackdropPixels / mayor;
+    }
 }

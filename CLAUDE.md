@@ -239,21 +239,31 @@ Recorre las pestañas en orden cada N s, dando la vuelta, con cuenta regresiva (
 
 ### Efectos de foto (✨ en la cabecera, solo imágenes) — `Media/PhotoEffect.cs` + `SectorView`
 
-None / Ken Burns (100→112% lineal + paneo leve; dura el intervalo si corre el slideshow, si no 10 s) /
-Punch-in (108→100% + fundido, 600 ms ease-out) / Fundido (400 ms). Sin cross-fade entre pestañas (airspace).
+None / Ken Burns (100→112% lineal + paneo leve, ida y vuelta SIN FIN mientras se ve; un tramo dura el
+intervalo si corre el slideshow, si no 10 s) / Punch-in (108→100% + fundido, 600 ms ease-out) / Fundido
+(400 ms), estos dos de una pasada. Sin cross-fade entre pestañas (airspace).
 - ✨ = CICLO (cada click cambia y reproduce: recorrerlo es la vista previa); "apretado" con efecto, el
-  tooltip dice cuál. Reglas puras (ciclo, nombres, `ToFile`/`FromFile`, duración) en `PhotoEffects`.
+  tooltip dice cuál. Reglas puras (ciclo, nombres, `ToFile`/`FromFile`, duración, fondo) en `PhotoEffects`.
 - `SectorNode.PhotoEffect`: dato del clip como el ping-pong — viaja en `MediaSnapshot`, `Unload` lo
   resetea, `Relink`/`Restore` lo conservan. Persistido por NOMBRE (`"PhotoEffect": "KenBurns"`) solo si ≠
   None; desconocido → None. Cambiarlo es cambio sin guardar.
 - Disparo = `Still.IsVisibleChanged` (pestaña activada, también por slideshow; imagen cargada; vuelta de
-  una expansión) + cambio de efecto/`ImageSource`. Al esconderse se sueltan las animaciones.
+  una expansión) + cambio de efecto/`ImageSource` + **F11 entrar/salir** (`MainWindow` →
+  `SectorView.ReplayPhotoEffects(this)`, recorre el árbol visual: sin evento estático que retenga vistas).
+  Al esconderse se sueltan las animaciones. (Una pasada con HoldEnd dejaba la foto quieta: "no hay efecto".)
+- ⚠ **Fondo desenfocado** (`BackdropHost`/`Backdrop` detrás de `Still`): con `Uniform` la foto deja
+  franjas y el zoom/paneo mueve SU borde (el del elemento no entra; el de la foto sí). Solo con imagen +
+  efecto (`ShowsBackdrop`); sin efecto, letterbox negro (herramienta de estudio). Misma foto en
+  `UniformToFill`, blur 14, opacidad 0,55, estático. ⚠ Barato a propósito (8 sectores, F11): copia de 96 px
+  de lado mayor (`BackdropScale`, `CachedBitmap` congelado, una vez por foto) + `BitmapCache` en el PADRE
+  del blur (no se recalcula mientras la foto anima) + margen negativo (el blur se desvanece en el borde).
+  `Backdrop.Source` se pone en código (no está bindeado).
 - ⚠ Solo `BeginAnimation` sobre transform/Opacity/`RenderTransformOrigin` de la `Image` (nada bindeado
   salvo `Source`). Paneo moviendo el ORIGEN (relativo): no depende de `ActualWidth` (0 en una pestaña
-  recién activada) y el borde nunca entra. Recorte en el `Border StillFrame` padre (el Clip de la propia
-  Image se transforma con ella). Duración del slideshow: `SectorView.SlideshowIntervalSeconds` (estático,
-  lo pone MainWindow al arrancar/parar).
-- Regresión: `BoardProbe` 25 (persistencia, snapshot, ciclo). La animación en sí NO tiene prueba automática.
+  recién activada). Recorte en el `Grid StillFrame` padre (el Clip de la propia Image se transforma con
+  ella). Duración del slideshow: `SectorView.SlideshowIntervalSeconds` (estático, lo pone MainWindow).
+- Regresión: `BoardProbe` 25 (persistencia, snapshot, ciclo) y 26 (regla del fondo, escala). La animación
+  y el fondo NO tienen prueba automática (humo a mano con capturas de la ventana).
 
 ### ⚠ Nunca asignes valor local a una DP con binding OneWay
 

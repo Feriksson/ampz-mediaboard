@@ -1388,6 +1388,7 @@ public partial class MainWindow : Window
         TopBar.Visibility = Visibility.Collapsed;
         TabStrip.Visibility = Visibility.Collapsed;
         _pantallaCompleta = true;
+        ReplayPhotoEffectsAfterLayout();
     }
 
     private void SalirDePantallaCompleta()
@@ -1404,7 +1405,17 @@ public partial class MainWindow : Window
         TopBar.Visibility = Visibility.Visible;
         TabStrip.Visibility = Visibility.Visible;
         _pantallaCompleta = false;
+        ReplayPhotoEffectsAfterLayout();
     }
+
+    /// <summary>
+    /// Al entrar/salir de pantalla completa la foto no cambia de visibilidad (solo de tamaño), así
+    /// que su efecto no se re-dispara solo: se pide acá, para pestaña activa y panel fijado. Con
+    /// prioridad Loaded: recién después del re-layout al tamaño nuevo, para que el efecto arranque
+    /// sobre el cuadro que el usuario va a ver. La animación vive en SectorView (capa de render).
+    /// </summary>
+    private void ReplayPhotoEffectsAfterLayout() =>
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => Controls.SectorView.ReplayPhotoEffects(this));
 
     #endregion
 
