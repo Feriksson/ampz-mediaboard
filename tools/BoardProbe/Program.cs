@@ -41,6 +41,7 @@ internal static class Program
         PingPongSeGuardaYViaja();
         ExpandirColapsaElCaminoYCongelaLosTapados();
         CorrerUnaVezEsDeTiempoDeEjecucion();
+        SlideshowRecorreYGuardaSoloElIntervalo();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -909,6 +910,62 @@ internal static class Program
         Check("vaciar el sector cancela", !t1.IsRunningOnce);
 
         File.Delete(archivo);
+    }
+
+    private static void SlideshowRecorreYGuardaSoloElIntervalo()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 24. SLIDESHOW: SIGUIENTE CON VUELTA, CUENTA REGRESIVA, INTERVALO SOLO SI != 10 ===");
+
+        Check("de la 0 a la 1", Slideshow.NextIndex(0, 3) == 1);
+        Check("de la ultima vuelve a la primera", Slideshow.NextIndex(2, 3) == 0);
+        Check("con una sola pestana se queda en ella", Slideshow.NextIndex(0, 1) == 0);
+        Check("indice invalido (pestana que ya no esta) arranca en la primera", Slideshow.NextIndex(-1, 3) == 0 && Slideshow.NextIndex(5, 3) == 0);
+
+        Check("6,2 s restantes = \"7s\" (redondea para arriba)", Slideshow.CountdownText(6200) == "7s");
+        Check("exacto 10 s = \"10s\"", Slideshow.CountdownText(10000) == "10s");
+        Check("nunca \"0s\"", Slideshow.CountdownText(0) == "1s" && Slideshow.CountdownText(-50) == "1s");
+        Check("desde el minuto, m:ss", Slideshow.CountdownText(125_000) == "2:05");
+
+        Check("\"15\" se lee 15", Slideshow.TryParse("15", out var quince) && quince == 15);
+        Check("\" 15s \" tambien", Slideshow.TryParse(" 15s ", out var quinceS) && quinceS == 15);
+        Check("por debajo del piso se acota a 2", Slideshow.TryParse("1", out var uno) && uno == Slideshow.MinSeconds);
+        Check("por encima del techo se acota a 3600", Slideshow.TryParse("99999", out var mucho) && mucho == Slideshow.MaxSeconds);
+        Check("basura no se acepta", !Slideshow.TryParse("abc", out _) && !Slideshow.TryParse("", out _));
+
+        // Persistencia: el intervalo es del DOCUMENTO, en la raiz, y SOLO si difiere del default.
+        var tabs = new List<TabData> { new("Board 1", SectorCon(@"D:\clips\s.mp4", 0, 1000, 100, false)) };
+        var porDefecto = BoardStore.Serialize(tabs);
+        Check("el default (10) NO se escribe", !porDefecto.Contains("SlideshowSeconds"));
+        Check("un 10 explicito serializa igual que la ausencia",
+            BoardStore.Serialize(tabs, null, null, Slideshow.DefaultSeconds) == porDefecto);
+        Check("otro valor SI se escribe", BoardStore.Serialize(tabs, null, null, 25).Contains("\"SlideshowSeconds\": 25"));
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-slideshow.mboard");
+        Check("se pudo guardar con 25 s", BoardStore.SaveTo(archivo, tabs, 0, null, 25) is null);
+        var leido = BoardStore.LoadFrom(archivo);
+        Check("vuelve en 25", leido?.SlideshowSeconds == 25);
+        Check("releido sin tocar NO es un cambio", leido is not null && BoardStore.MatchesFile(archivo, leido.Tabs, leido.Dock, 25));
+        Check("cambiar el intervalo SI es un cambio", leido is not null && !BoardStore.MatchesFile(archivo, leido.Tabs, leido.Dock, 30));
+
+        // Un v2 anterior a la feature (sin el campo) carga con 10 y NO se lee modificado.
+        var viejo = Path.Combine(Path.GetTempPath(), "probe-slideshow-viejo.mboard");
+        File.WriteAllText(viejo, """{"Version":2,"ActiveTab":0,"Tabs":[{"Name":"Uno","Root":{"Type":"sector","Volume":80}}]}""");
+        var leidoViejo = BoardStore.LoadFrom(viejo);
+        Check("un archivo sin el campo carga con 10", leidoViejo?.SlideshowSeconds == Slideshow.DefaultSeconds);
+        Check("y NO se lee como modificado", leidoViejo is not null &&
+            BoardStore.MatchesFile(viejo, leidoViejo.Tabs, leidoViejo.Dock, leidoViejo.SlideshowSeconds));
+
+        // Tocado a mano: un "SlideshowSeconds": 10 explicito normaliza a ausente, un 1 se acota.
+        File.WriteAllText(viejo, """{"Version":2,"SlideshowSeconds":10,"Tabs":[{"Name":"Uno","Root":{"Type":"sector","Volume":80}}]}""");
+        var explicito = BoardStore.LoadFrom(viejo);
+        Check("un 10 escrito a mano tampoco es un cambio", explicito is not null &&
+            BoardStore.MatchesFile(viejo, explicito.Tabs, explicito.Dock, explicito.SlideshowSeconds));
+        File.WriteAllText(viejo, """{"Version":2,"SlideshowSeconds":1,"Tabs":[{"Name":"Uno","Root":{"Type":"sector","Volume":80}}]}""");
+        Check("un 1 escrito a mano carga acotado a 2", BoardStore.LoadFrom(viejo)?.SlideshowSeconds == Slideshow.MinSeconds);
+
+        File.Delete(archivo);
+        File.Delete(viejo);
     }
 
     /// <summary>Fraccion del board que ocupa una hoja: el producto de los ratios hasta la raiz.</summary>

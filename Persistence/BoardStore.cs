@@ -19,7 +19,12 @@ public sealed record DockData(double Width, IReadOnlyList<SectorNode> Sectors);
 /// Un archivo `.mboard` leído: TODAS sus pestañas, cuál estaba activa al guardarlo y el panel
 /// fijado (null si no había ninguno: los archivos anteriores al panel no lo tienen).
 /// </summary>
-public sealed record DocumentData(IReadOnlyList<TabData> Tabs, int ActiveTab, DockData? Dock = null);
+/// <remarks>
+/// <paramref name="SlideshowSeconds"/>: intervalo del slideshow, UNO para todo el documento (ver
+/// <see cref="AmpzMediaBoard.Board.Slideshow"/>). Se guarda; que esté corriendo, no.
+/// </remarks>
+public sealed record DocumentData(IReadOnlyList<TabData> Tabs, int ActiveTab, DockData? Dock = null,
+    int SlideshowSeconds = AmpzMediaBoard.Board.Slideshow.DefaultSeconds);
 
 /// <summary>
 /// El archivo tal como estaba al abrirlo o guardarlo, NORMALIZADO (ver <see cref="BoardStore.ReadSnapshot"/>):
@@ -33,7 +38,7 @@ public sealed record FileSnapshot(string Document, IReadOnlyList<string> Tabs);
 /// una con su árbol de layout + qué archivo hay en cada sector + los markers de loop.
 ///
 /// Formato v2 (lo único que se escribe):
-/// <code>{ "Version": 2, "ActiveTab": i, "Tabs": [ { "Name", "MasterVolume"?, "Root": {árbol} } ], "Dock"?: { "Width", "Sectors": [ {sector} ] } }</code>
+/// <code>{ "Version": 2, "ActiveTab": i, "SlideshowSeconds"?, "Tabs": [ { "Name", "MasterVolume"?, "Root": {árbol} } ], "Dock"?: { "Width", "Sectors": [ {sector} ] } }</code>
 /// "Dock" es del ARCHIVO y no de una pestaña (el panel fijado vive fuera de las pestañas), y se
 /// escribe SOLO si el panel tiene algo: un v2 anterior al panel y uno con el panel vacío
 /// describen el mismo documento, y tienen que normalizar igual.
@@ -76,6 +81,14 @@ public static class BoardStore
         /// un aviso que salta sin motivo es un aviso que el usuario aprende a ignorar.
         /// </summary>
         public int? ActiveTab { get; set; }
+
+        /// <summary>
+        /// Intervalo del slideshow en segundos. ⚠ Nullable y escrito SOLO si difiere del de por
+        /// defecto (<see cref="AmpzMediaBoard.Board.Slideshow.SecondsOrNull"/>): un archivo
+        /// anterior a la feature y uno con el default describen el mismo documento. Va antes de
+        /// Tabs a propósito: es del documento, y así se lee arriba del archivo.
+        /// </summary>
+        public int? SlideshowSeconds { get; set; }
 
         public List<TabDto> Tabs { get; set; } = [];
 
@@ -176,8 +189,9 @@ public static class BoardStore
     /// clip, mover un marker, partir un sector, renombrar o cerrar una pestaña…) y alcanza con
     /// que se escape una para que el aviso mienta. Comparar el resultado no puede equivocarse.
     /// </summary>
-    public static string Serialize(IReadOnlyList<TabData> tabs, DockData? dock = null, int? activeTab = null) =>
-        JsonSerializer.Serialize(ToFileDto(tabs, dock, activeTab), Options);
+    public static string Serialize(IReadOnlyList<TabData> tabs, DockData? dock = null, int? activeTab = null,
+        int slideshowSeconds = AmpzMediaBoard.Board.Slideshow.DefaultSeconds) =>
+        JsonSerializer.Serialize(ToFileDto(tabs, dock, activeTab, slideshowSeconds), Options);
 
     /// <summary>Una pestaña sola, en la forma de comparar. Pinta la "•" de esa pestaña.</summary>
     public static string SerializeTab(TabData tab) => JsonSerializer.Serialize(ToTabDto(tab), Options);
@@ -187,9 +201,10 @@ public static class BoardStore
     /// de cambios sin guardar. Ante cualquier duda (archivo ilegible, corrupto) devuelve true: no
     /// vamos a trabarle el cierre al usuario por un problema de disco.
     /// </summary>
-    public static bool MatchesFile(string path, IReadOnlyList<TabData> tabs, DockData? dock = null) =>
+    public static bool MatchesFile(string path, IReadOnlyList<TabData> tabs, DockData? dock = null,
+        int slideshowSeconds = AmpzMediaBoard.Board.Slideshow.DefaultSeconds) =>
         ReadSnapshot(path) is not { } saved ||
-        string.Equals(Serialize(tabs, dock), saved.Document, StringComparison.Ordinal);
+        string.Equals(Serialize(tabs, dock, null, slideshowSeconds), saved.Document, StringComparison.Ordinal);
 
     /// <summary>
     /// El contenido del archivo NORMALIZADO, en la forma de comparar, o null si no se pudo leer.
@@ -224,11 +239,12 @@ public static class BoardStore
     /// Guarda TODAS las pestañas en un archivo del usuario, siempre en formato v2. Devuelve el
     /// error si falló, o null si salió bien.
     /// </summary>
-    public static string? SaveTo(string path, IReadOnlyList<TabData> tabs, int activeTab, DockData? dock = null)
+    public static string? SaveTo(string path, IReadOnlyList<TabData> tabs, int activeTab, DockData? dock = null,
+        int slideshowSeconds = AmpzMediaBoard.Board.Slideshow.DefaultSeconds)
     {
         try
         {
-            File.WriteAllText(path, Serialize(tabs, dock, activeTab));
+            File.WriteAllText(path, Serialize(tabs, dock, activeTab, slideshowSeconds));
             return null;
         }
         catch (Exception ex)
@@ -260,7 +276,8 @@ public static class BoardStore
             var dock = file.Dock is { } d
                 ? new DockData(d.Width, d.Sectors.Select(s => (SectorNode)FromDto(s)).ToList())
                 : null;
-            return new DocumentData(tabs, Math.Clamp(file.ActiveTab ?? 0, 0, tabs.Count - 1), dock);
+            return new DocumentData(tabs, Math.Clamp(file.ActiveTab ?? 0, 0, tabs.Count - 1), dock,
+                file.SlideshowSeconds ?? AmpzMediaBoard.Board.Slideshow.DefaultSeconds);
         }
         catch
         {
@@ -328,6 +345,10 @@ public static class BoardStore
             if (dock.Sectors.Count == 0) file.Dock = null;
         }
 
+        // La MISMA regla que al escribir: un 10 explícito (o un 1 tipeado a mano, que se acota)
+        // normaliza igual que lo que escribiría la app.
+        file.SlideshowSeconds = AmpzMediaBoard.Board.Slideshow.SecondsOrNull(file.SlideshowSeconds);
+
         file.Version = FormatVersion;
         return file;
     }
@@ -346,10 +367,11 @@ public static class BoardStore
 
     #endregion
 
-    private static FileDto ToFileDto(IReadOnlyList<TabData> tabs, DockData? dock, int? activeTab) => new()
+    private static FileDto ToFileDto(IReadOnlyList<TabData> tabs, DockData? dock, int? activeTab, int slideshowSeconds) => new()
     {
         Version = FormatVersion,
         ActiveTab = activeTab,
+        SlideshowSeconds = AmpzMediaBoard.Board.Slideshow.SecondsOrNull(slideshowSeconds),
         Tabs = tabs.Select(ToTabDto).ToList(),
         Dock = ToDockDto(dock),
     };
