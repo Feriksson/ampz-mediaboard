@@ -237,6 +237,24 @@ Recorre las pestañas en orden cada N s, dando la vuelta, con cuenta regresiva (
   cambio sin guardar (todo pasa por `MainWindow.SerializeDocument`). Corriendo o no: runtime, nunca "•".
 - Regresión: `BoardProbe` 24. El timer y el cambio real de pestañas NO tienen prueba automática.
 
+### Efectos de foto (✨ en la cabecera, solo imágenes) — `Media/PhotoEffect.cs` + `SectorView`
+
+None / Ken Burns (100→112% lineal + paneo leve; dura el intervalo si corre el slideshow, si no 10 s) /
+Punch-in (108→100% + fundido, 600 ms ease-out) / Fundido (400 ms). Sin cross-fade entre pestañas (airspace).
+- ✨ = CICLO (cada click cambia y reproduce: recorrerlo es la vista previa); "apretado" con efecto, el
+  tooltip dice cuál. Reglas puras (ciclo, nombres, `ToFile`/`FromFile`, duración) en `PhotoEffects`.
+- `SectorNode.PhotoEffect`: dato del clip como el ping-pong — viaja en `MediaSnapshot`, `Unload` lo
+  resetea, `Relink`/`Restore` lo conservan. Persistido por NOMBRE (`"PhotoEffect": "KenBurns"`) solo si ≠
+  None; desconocido → None. Cambiarlo es cambio sin guardar.
+- Disparo = `Still.IsVisibleChanged` (pestaña activada, también por slideshow; imagen cargada; vuelta de
+  una expansión) + cambio de efecto/`ImageSource`. Al esconderse se sueltan las animaciones.
+- ⚠ Solo `BeginAnimation` sobre transform/Opacity/`RenderTransformOrigin` de la `Image` (nada bindeado
+  salvo `Source`). Paneo moviendo el ORIGEN (relativo): no depende de `ActualWidth` (0 en una pestaña
+  recién activada) y el borde nunca entra. Recorte en el `Border StillFrame` padre (el Clip de la propia
+  Image se transforma con ella). Duración del slideshow: `SectorView.SlideshowIntervalSeconds` (estático,
+  lo pone MainWindow al arrancar/parar).
+- Regresión: `BoardProbe` 25 (persistencia, snapshot, ciclo). La animación en sí NO tiene prueba automática.
+
 ### ⚠ Nunca asignes valor local a una DP con binding OneWay
 
 Destruye el binding para siempre (bug: playhead clavado tras el primer click). `LoopTimeline` no es
@@ -335,7 +353,7 @@ guardar. **La pestaña activa se persiste (`ActiveTab`) pero NO es cambio sin gu
 ### Mover media entre sectores = INTERCAMBIAR (`BoardViewModel.SwapMedia`)
 
 Soltar sobre ocupado reacomoda, no destruye. Viaja `SectorNode.MediaSnapshot` (path, posición,
-markers, volumen, mute, ping-pong), **nunca el `MediaPlayer`** (atado a su HWND). ⚠ Tomar las DOS fotos
+markers, volumen, mute, ping-pong, efecto de foto), **nunca el `MediaPlayer`** (atado a su HWND). ⚠ Tomar las DOS fotos
 antes de restaurar ninguna. Asa = cabecera (con umbral de arrastre, botones excluidos). ⚠ El origen
 viaja en un campo estático (`SectorView._dragSource`), no en el `DataObject` (COM); se limpia en `finally`.
 
@@ -398,7 +416,7 @@ pregunta (un aviso innecesario se aprende a ignorar).
   pestaña con el nombre del archivo.
 - ⚠ El formato se detecta mirando el JSON (`Tabs`/`Version` en la raíz), no con try/catch: un v2 roto
   leído como viejo cargaría vacío y pisaría el bueno. v2 sin pestañas = corrupto.
-- Campos opcionales (`MasterVolume` ≠ 100, `PingPong: true`, `Dock`, `SlideshowSeconds` ≠ 10) se escriben solo si difieren del
+- Campos opcionales (`MasterVolume` ≠ 100, `PingPong: true`, `PhotoEffect` ≠ None, `Dock`, `SlideshowSeconds` ≠ 10) se escriben solo si difieren del
   default, para que archivos viejos comparen igual.
 
 ### ⚠ Archivo ausente: la referencia NO se descarta
@@ -477,7 +495,7 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 |---|---|
 | `Layout/` | `LayoutNode`, `SplitNode`, `SectorNode` |
 | `Board/` | `BoardViewModel`, `BoardView`, `BoardTab`, `TabOrder`, `PinnedDock`, `RunOnce`, `Slideshow` |
-| `Media/` | `VlcEngine`, `MediaKind`, `PingPongMath`, `PingPongRenderer` |
+| `Media/` | `VlcEngine`, `MediaKind`, `PingPongMath`, `PingPongRenderer`, `PhotoEffect` |
 | `Controls/` | `SectorView` (capa de render), `LoopTimeline` |
 | `Persistence/` | `AppPaths`, `BoardStore`, `BoardFile` |
 | raíz | `App`, `MainWindow`, `DiagLog`, íconos |
@@ -485,7 +503,7 @@ Varios boards en varias ventanas es un caso de uso buscado. Instancias independi
 
 **Pruebas** (`tools/`):
 - Sondas `dotnet run`, salen 0/1: `LoopProbe` (binding del playhead), `BoardProbe` (swap, persistencia,
-  ausente, distribuir, solo, master, pestañas, reorden, panel, ping-pong puro, expandir, correr una vez, slideshow), `RestartProbe` (reinicio
+  ausente, distribuir, solo, master, pestañas, reorden, panel, ping-pong puro, expandir, correr una vez, slideshow, efecto de foto), `RestartProbe` (reinicio
   del loop, toca VLC), `PingPongProbe` (ffmpeg real). `WarmupProbe` **mide**, no testea.
 - `test-*.ps1` contra la app corriendo: missing, loop, restart, close, tabs, tab-reorder, dock, audio,
   replace, pingpong, warmup, fullscreen, doubleclick, multi, boardfile. Código **2** = no se pudo medir

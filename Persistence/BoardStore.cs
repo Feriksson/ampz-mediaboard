@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using AmpzMediaBoard.Layout;
+using AmpzMediaBoard.Media;
 
 namespace AmpzMediaBoard.Persistence;
 
@@ -146,6 +147,13 @@ public static class BoardStore
         /// generado: ese es un temporal descartable que se rehace al abrir.
         /// </summary>
         public bool? PingPong { get; set; }
+
+        /// <summary>
+        /// Efecto de entrada de la foto (ver Media.PhotoEffect), por NOMBRE. ⚠ Escrito SOLO si ≠
+        /// None (<see cref="PhotoEffects.ToFile"/>), por el mismo motivo que PingPong: un archivo
+        /// anterior a la feature tiene que normalizar igual que uno sin efectos.
+        /// </summary>
+        public string? PhotoEffect { get; set; }
 
         /// <summary>
         /// SOLO en archivos del formato VIEJO: ahí el volumen general vivía en el nodo raíz,
@@ -361,6 +369,8 @@ public static class BoardStore
     {
         if (node is null) return;
         if (node.PingPong != true) node.PingPong = null;
+        // Desconocido o "None" escrito a mano = ausente; y el nombre queda en su forma canónica.
+        node.PhotoEffect = PhotoEffects.ToFile(PhotoEffects.FromFile(node.PhotoEffect));
         NormalizeSectors(node.First);
         NormalizeSectors(node.Second);
     }
@@ -415,6 +425,7 @@ public static class BoardStore
             Volume = sector.Volume,
             Muted = sector.IsMuted,
             PingPong = sector.PingPong ? true : null,
+            PhotoEffect = PhotoEffects.ToFile(sector.PhotoEffect),
         },
         _ => new NodeDto(),
     };
@@ -455,6 +466,7 @@ public static class BoardStore
             // El pedido de ping-pong también se conserva en un sector ausente, por el mismo
             // motivo que los markers: si se perdiera acá, el primer guardado lo borraría.
             sector.PingPong = dto.PingPong == true;
+            sector.PhotoEffect = PhotoEffects.FromFile(dto.PhotoEffect);
             return sector;
         }
 
@@ -465,6 +477,8 @@ public static class BoardStore
         // duración: en ese caso el primer Tick lo va a completar solo.
         sector.LoopStartMs = dto.LoopStart;
         sector.LoopEndMs = dto.LoopEnd;
+        // También después de Load(), que lo resetea.
+        sector.PhotoEffect = PhotoEffects.FromFile(dto.PhotoEffect);
 
         // DESPUÉS de los markers: prenderlo pide la generación con esa zona. El clip arranca con
         // el ORIGINAL y se pasa al generado cuando ffmpeg termina (ver SectorNode.RequestPingPong

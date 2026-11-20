@@ -42,6 +42,7 @@ internal static class Program
         ExpandirColapsaElCaminoYCongelaLosTapados();
         CorrerUnaVezEsDeTiempoDeEjecucion();
         SlideshowRecorreYGuardaSoloElIntervalo();
+        EfectoDeFotoSeGuardaYViaja();
 
         Console.WriteLine();
         Console.WriteLine(_fallos == 0 ? "=== TODO OK ===" : $"=== {_fallos} FALLO(S) ===");
@@ -963,6 +964,74 @@ internal static class Program
             BoardStore.MatchesFile(viejo, explicito.Tabs, explicito.Dock, explicito.SlideshowSeconds));
         File.WriteAllText(viejo, """{"Version":2,"SlideshowSeconds":1,"Tabs":[{"Name":"Uno","Root":{"Type":"sector","Volume":80}}]}""");
         Check("un 1 escrito a mano carga acotado a 2", BoardStore.LoadFrom(viejo)?.SlideshowSeconds == Slideshow.MinSeconds);
+
+        File.Delete(archivo);
+        File.Delete(viejo);
+    }
+
+    private static void EfectoDeFotoSeGuardaYViaja()
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== 25. EFECTO DE FOTO: CICLO, SE GUARDA SOLO SI != None, VIAJA CON LA FOTO ===");
+
+        Check("ciclo: None -> Ken Burns -> Punch-in -> Fundido -> None",
+            PhotoEffects.Next(PhotoEffect.None) == PhotoEffect.KenBurns &&
+            PhotoEffects.Next(PhotoEffect.KenBurns) == PhotoEffect.PunchIn &&
+            PhotoEffects.Next(PhotoEffect.PunchIn) == PhotoEffect.Fade &&
+            PhotoEffects.Next(PhotoEffect.Fade) == PhotoEffect.None);
+        Check("None se escribe ausente", PhotoEffects.ToFile(PhotoEffect.None) is null);
+        Check("desconocido, numero o null se leen None",
+            PhotoEffects.FromFile("Bogus") == PhotoEffect.None && PhotoEffects.FromFile("1") == PhotoEffect.None &&
+            PhotoEffects.FromFile(null) == PhotoEffect.None);
+        Check("el nombre se lee sin importar mayusculas", PhotoEffects.FromFile("kenburns") == PhotoEffect.KenBurns);
+        Check("Ken Burns sin slideshow dura 10 s", PhotoEffects.KenBurnsDuration(null) == TimeSpan.FromSeconds(10));
+        Check("con slideshow dura el intervalo", PhotoEffects.KenBurnsDuration(25) == TimeSpan.FromSeconds(25));
+
+        var con = SectorCon(@"D:\fotos\a.jpg", 0, 0, 100, false);
+        con.PhotoEffect = PhotoEffect.KenBurns;
+        var sin = SectorCon(@"D:\fotos\b.jpg", 0, 0, 100, false);
+        LayoutNode raiz = new SplitNode(SplitOrientation.Horizontal, con, sin);
+
+        var texto = BoardStore.Serialize([new TabData("Board 1", raiz)]);
+        Check("el efecto se escribe por nombre", texto.Contains("\"PhotoEffect\": \"KenBurns\""));
+        Check("None NO se escribe (archivos viejos comparan igual)", texto.Split("PhotoEffect").Length == 2);
+
+        var archivo = Path.Combine(Path.GetTempPath(), "probe-efecto.mboard");
+        BoardStore.SaveTo(archivo, [new TabData("Board 1", raiz)], 0);
+        var leido = BoardStore.LoadFrom(archivo);
+        if (leido?.Tabs[0].Root is SplitNode { First: SectorNode a, Second: SectorNode b })
+        {
+            Check("vuelve con Ken Burns (aunque la foto este AUSENTE)", a.PhotoEffect == PhotoEffect.KenBurns);
+            Check("el otro vuelve sin efecto", b.PhotoEffect == PhotoEffect.None);
+            Check("releido sin tocar NO es un cambio", BoardStore.MatchesFile(archivo, leido.Tabs));
+            b.PhotoEffect = PhotoEffect.Fade;
+            Check("cambiar el efecto SI es un cambio", !BoardStore.MatchesFile(archivo, leido.Tabs));
+        }
+        else Check("la estructura leida es un split con dos sectores", false);
+
+        // Un v2 anterior a la feature, uno con "None" a mano y uno con un nombre desconocido: el
+        // mismo documento, ninguno se lee modificado.
+        var viejo = Path.Combine(Path.GetTempPath(), "probe-efecto-viejo.mboard");
+        foreach (var campo in new[] { "", ",\"PhotoEffect\":\"None\"", ",\"PhotoEffect\":\"Bogus\"" })
+        {
+            File.WriteAllText(viejo, """{"Version":2,"Tabs":[{"Name":"B","Root":{"Type":"sector","Path":"D:\\fotos\\v.jpg" """ + campo + "}}]}");
+            var l = BoardStore.LoadFrom(viejo);
+            Check($"sin efecto valido ({(campo.Length == 0 ? "sin campo" : campo.TrimStart(','))}) carga None y NO es un cambio",
+                l?.Tabs[0].Root is SectorNode { PhotoEffect: PhotoEffect.None } && BoardStore.MatchesFile(viejo, l.Tabs));
+        }
+
+        // Intercambiar y fijar viajan por MediaSnapshot: el efecto va con su foto.
+        var vm = new BoardViewModel();
+        vm.ReplaceRoot(raiz);
+        vm.SwapMedia(con, sin);
+        Check("intercambiar: el destino recibe el Ken Burns", sin.PhotoEffect == PhotoEffect.KenBurns && sin.MissingPath == @"D:\fotos\a.jpg");
+        Check("intercambiar: el origen recibe el sin efecto", con.PhotoEffect == PhotoEffect.None);
+        var dock = new PinnedDock();
+        var fijado = dock.Pin(vm, sin)!;
+        Check("fijar: el efecto viaja al panel", fijado.PhotoEffect == PhotoEffect.KenBurns);
+
+        fijado.Unload();
+        Check("vaciar el sector suelta el efecto (es de esa foto)", fijado.PhotoEffect == PhotoEffect.None);
 
         File.Delete(archivo);
         File.Delete(viejo);

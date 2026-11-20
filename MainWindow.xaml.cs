@@ -462,6 +462,8 @@ public partial class MainWindow : Window
         }
 
         _slideshowRunning = true;
+        // ANTES del primer cambio: el Ken Burns de cada pestaña que entra dura el intervalo.
+        AmpzMediaBoard.Controls.SectorView.SlideshowIntervalSeconds = _slideshowSeconds;
         DiagLog.Write($"slideshow start {_slideshowSeconds}");
         RestartSlideshowCountdown();
         _slideshowTimer.Start();
@@ -473,6 +475,7 @@ public partial class MainWindow : Window
         if (!_slideshowRunning) return;
         _slideshowRunning = false;
         _slideshowTimer?.Stop();
+        AmpzMediaBoard.Controls.SectorView.SlideshowIntervalSeconds = null;
         DiagLog.Write("slideshow stop");
         SyncSlideshowUi();
     }
@@ -532,6 +535,7 @@ public partial class MainWindow : Window
         SlideshowIntervalBox.Text = clamped.ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (changed && _slideshowRunning)
         {
+            AmpzMediaBoard.Controls.SectorView.SlideshowIntervalSeconds = clamped;
             RestartSlideshowCountdown();
             SyncSlideshowUi();
         }

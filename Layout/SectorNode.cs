@@ -236,6 +236,15 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// </summary>
     [ObservableProperty] private bool _isMuted;
 
+    /// <summary>
+    /// Efecto de entrada de la FOTO (✨ en la cabecera, solo imágenes). Es dato del clip, como el
+    /// ping-pong: se persiste (solo si ≠ None), viaja en <see cref="MediaSnapshot"/> y
+    /// <see cref="Unload"/> lo resetea — una imagen nueva arranca sin efecto; quien quiere
+    /// conservarlo (Relink, Restore) lo vuelve a poner después. Cambiarlo es un cambio sin
+    /// guardar (lo ve la comparación contra el archivo). La animación es de SectorView.
+    /// </summary>
+    [ObservableProperty] private PhotoEffect _photoEffect;
+
     partial void OnVolumeChanged(int value) => ApplyAudio();
 
     partial void OnIsMutedChanged(bool value) => ApplyAudio();
@@ -446,7 +455,8 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         bool LoopEnabled,
         int Volume,
         bool IsMuted,
-        bool PingPong);
+        bool PingPong,
+        PhotoEffect PhotoEffect = PhotoEffect.None);
 
     /// <summary>
     /// ⚠ PositionMs es SIEMPRE tiempo ORIGINAL (también en ping-pong): el destino recarga el
@@ -454,7 +464,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
     /// caché) y se pasa al generado solo — ver <see cref="Restore"/>.
     /// </summary>
     public MediaSnapshot TakeSnapshot() => new(
-        MediaPath, MissingPath, PositionMs, LoopStartMs, LoopEndMs, LoopEnabled, Volume, IsMuted, PingPong);
+        MediaPath, MissingPath, PositionMs, LoopStartMs, LoopEndMs, LoopEnabled, Volume, IsMuted, PingPong, PhotoEffect);
 
     /// <summary>Aplica una foto tomada con <see cref="TakeSnapshot"/>. Vacía el sector si la foto está vacía.</summary>
     public void Restore(MediaSnapshot snapshot)
@@ -482,6 +492,8 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         LoopStartMs = snapshot.LoopStartMs;
         LoopEndMs = snapshot.LoopEndMs;
         LoopEnabled = snapshot.LoopEnabled;
+        // Después del Load (que lo resetea vía Unload): el efecto viaja con su foto.
+        PhotoEffect = snapshot.PhotoEffect;
 
         // ÚLTIMO, después de los markers: prenderlo pide la generación con la zona que ya quedó
         // puesta. El clip arranca con el original (desde donde iba) y se pasa al generado cuando
@@ -546,9 +558,12 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         var loopEnd = LoopEndMs;
         var loopEnabled = LoopEnabled;
         var pingPong = PingPong;
+        var photoEffect = PhotoEffect;
 
         Load(path);
 
+        // Re-vincular es "el mismo clip, en otro lado": el efecto elegido se conserva.
+        PhotoEffect = photoEffect;
         LoopStartMs = loopStart;
         LoopEndMs = loopEnd;
         LoopEnabled = loopEnabled;
@@ -667,6 +682,7 @@ public sealed partial class SectorNode : LayoutNode, IDisposable
         // recibe otro clip) arranca sin él. Quien quiere conservarlo (Relink, Remount, Restore)
         // lo vuelve a poner DESPUÉS, igual que hace con los markers.
         PingPong = false;
+        PhotoEffect = PhotoEffect.None;
         PingPongStatus = PingPongStatus.Off;
         PingPongError = null;
         OnPropertyChanged(nameof(HasMedia));
